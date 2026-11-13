@@ -5,10 +5,14 @@ import IOKit
 /// Minimal DDC/CI implementation for external displays.
 ///
 /// The display is reached through a `DCPAVServiceProxy` video-interface service.
-/// Current SDKs no longer expose the display-to-I/O-service mapping, so the
+/// Current SDKs no longer expose the display-to-I/O-service mapping, so each
 /// service's DCP port index (`dispextN` / `DCPEXTN` in its ancestor chain) is
-/// matched against the CoreGraphics display unit number. Standard DDC/CI Get VCP
-/// and Set VCP frames are then exchanged over the I2C side channel.
+/// paired with the framebuffer on the same port, whose `DisplayAttributes`
+/// name the attached monitor's EDID vendor, product and serial. Those are
+/// matched against the CoreGraphics display. The CoreGraphics unit number is
+/// only a fallback: it does not follow the port order (unit 1 can sit on port 1).
+/// Standard DDC/CI Get VCP and Set VCP frames are then exchanged over the I2C
+/// side channel.
 public final class DDCController {
     public static let shared = DDCController()
 
@@ -145,7 +149,22 @@ public final class DDCController {
     private struct VideoService {
         let entryID: UInt64
         let portIndex: Int?
+        /// The monitor on this service's port, when its framebuffer reports one.
+        let monitor: MonitorIdentity?
         let service: UnsafeMutableRawPointer
+    }
+
+    /// EDID identity of the monitor a DCP port drives, as its framebuffer
+    /// reports it. Uses the same numbers CoreGraphics exposes for a display.
+    public struct MonitorIdentity: Equatable {
+        public let vendor: UInt32
+        public let product: UInt32
+        public let serial: UInt32
+        public let name: String?
+
+        func matches(vendor: UInt32, product: UInt32) -> Bool {
+            self.vendor == vendor && self.product == product
+        }
     }
 
     /// Balances `IOAVServiceCreateWithService`, which returns a retained
@@ -219,23 +238,47 @@ public final class DDCController {
     private func match(_ id: CGDirectDisplayID, among candidates: [VideoService]) -> VideoService? {
         guard !candidates.isEmpty else { return nil }
 
-        // 1. Match the display unit number to the DCP port index. Port indices are
-        // zero-based while display unit numbers are one-based. The video-service
-        // EDID export is not used: its runtime ABI is not stable across releases.
+        // 1. The port whose framebuffer reports this display's EDID vendor,
+        // product and serial. The video-service EDID export is not used: its
+        // runtime ABI is not stable across releases.
+        let vendor = CGDisplayVendorNumber(id)
+        let product = CGDisplayModelNumber(id)
+        let serial = CGDisplaySerialNumber(id)
+        let sameModel = candidates.filter { $0.monitor?.matches(vendor: vendor, product: product) == true }
+        let sameMonitor = sameModel.filter { $0.monitor?.serial == serial }
+        if sameMonitor.count == 1 { return sameMonitor[0] }
+
+        // Two identical monitors without distinct serials still narrow the
+        // choice to their ports. Otherwise only ports that report no monitor
+        // are left: a port showing a different monitor belongs to that one,
+        // and taking it would drive the wrong screen.
+        let pool: [VideoService]
+        if !sameMonitor.isEmpty {
+            pool = sameMonitor
+        } else if !sameModel.isEmpty {
+            pool = sameModel
+        } else {
+            pool = candidates.filter { $0.monitor == nil }
+        }
+        guard !pool.isEmpty else { return nil }
+
+        // 2. Match the display unit number to the DCP port index. Port indices are
+        // zero-based while display unit numbers are one-based. This does not
+        // hold on every machine, so it only decides between unidentified ports.
         let unit = Int(CGDisplayUnitNumber(id))
-        if let byUnit = candidates.first(where: { $0.portIndex == unit - 1 })
-            ?? candidates.first(where: { $0.portIndex == unit }) {
+        if let byUnit = pool.first(where: { $0.portIndex == unit - 1 })
+            ?? pool.first(where: { $0.portIndex == unit }) {
             return byUnit
         }
 
-        // 2. A single unclaimed service path on the machine.
-        if candidates.count == 1 { return candidates[0] }
+        // 3. A single remaining service path on the machine.
+        if pool.count == 1 { return pool[0] }
 
-        // 3. Deterministic assignment by display order, among the displays
+        // 4. Deterministic assignment by display order, among the displays
         // that have no service yet.
         let waiting = onlineExternalDisplayIDs().filter { services[$0] == nil }.sorted()
-        if let index = waiting.firstIndex(of: id), index < candidates.count {
-            return candidates[index]
+        if let index = waiting.firstIndex(of: id), index < pool.count {
+            return pool[index]
         }
         return nil
     }
@@ -259,6 +302,7 @@ public final class DDCController {
                                            &iterator) == KERN_SUCCESS else { return [] }
         defer { IOObjectRelease(iterator) }
 
+        let monitors = monitorsByPort()
         var result: [VideoService] = []
         var entry = IOIteratorNext(iterator)
         while entry != 0 {
@@ -275,13 +319,61 @@ public final class DDCController {
             guard IORegistryEntryGetRegistryEntryID(entry, &entryID) == KERN_SUCCESS,
                   !excluded.contains(entryID) else { continue }
             guard let created = createFn(kCFAllocatorDefault, entry) else { continue }
-            result.append(VideoService(entryID: entryID, portIndex: dcpPortIndex(of: entry), service: created))
+            let portIndex = dcpPortIndex(of: entry)
+            result.append(VideoService(entryID: entryID,
+                                       portIndex: portIndex,
+                                       monitor: portIndex.flatMap { monitors[$0] },
+                                       service: created))
         }
         return result
     }
 
-    /// Reads the `dispextN` / `DCPEXTN` role from the service's ancestor chain.
+    /// The monitor on each external DCP port, read from the framebuffers'
+    /// `DisplayAttributes` (`IOMobileFramebufferShim`, `AppleCLCD2` on older
+    /// releases; both are `IOMobileFramebuffer`s). A port with more than one
+    /// framebuffer reporting a monitor is left out, since it cannot be told
+    /// which one the service reaches.
+    private func monitorsByPort() -> [Int: MonitorIdentity] {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+                                           IOServiceMatching("IOMobileFramebuffer"),
+                                           &iterator) == KERN_SUCCESS else { return [:] }
+        defer { IOObjectRelease(iterator) }
+
+        var result: [Int: MonitorIdentity] = [:]
+        var ambiguous: Set<Int> = []
+        var entry = IOIteratorNext(iterator)
+        while entry != 0 {
+            defer {
+                IOObjectRelease(entry)
+                entry = IOIteratorNext(iterator)
+            }
+            guard let port = dcpPortIndex(of: entry),
+                  let attributes = IORegistryEntryCreateCFProperty(entry,
+                                                                   "DisplayAttributes" as CFString,
+                                                                   kCFAllocatorDefault,
+                                                                   0)?.takeRetainedValue() as? [String: Any],
+                  let product = attributes["ProductAttributes"] as? [String: Any],
+                  let vendorID = (product["LegacyManufacturerID"] as? NSNumber)?.uint32Value,
+                  let productID = (product["ProductID"] as? NSNumber)?.uint32Value else { continue }
+            let identity = MonitorIdentity(vendor: vendorID,
+                                           product: productID,
+                                           serial: (product["SerialNumber"] as? NSNumber)?.uint32Value ?? 0,
+                                           name: product["ProductName"] as? String)
+            if result[port] != nil { ambiguous.insert(port) }
+            result[port] = identity
+        }
+        for port in ambiguous { result.removeValue(forKey: port) }
+        return result
+    }
+
+    /// Reads the `dispextN` / `DCPEXTN` port from the entry's ancestor chain:
+    /// a service's interface name or role, or a framebuffer's `dispextN` parent.
     private func dcpPortIndex(of entry: io_registry_entry_t) -> Int? {
+        func portIndex(in value: String) -> Int? {
+            guard let range = value.range(of: "dispext") ?? value.range(of: "DCPEXT") else { return nil }
+            return Int(value[range.upperBound...].prefix { $0.isNumber })
+        }
         var current: io_registry_entry_t = entry
         IOObjectRetain(current)
         for _ in 0..<6 {
@@ -289,12 +381,17 @@ public final class DDCController {
                 if let value = IORegistryEntryCreateCFProperty(current,
                                                                key as CFString,
                                                                kCFAllocatorDefault,
-                                                               0)?.takeRetainedValue() as? String {
-                    if let range = value.range(of: "dispext") ?? value.range(of: "DCPEXT") {
-                        let digits = value[range.upperBound...].prefix { $0.isNumber }
-                        if let index = Int(digits) { IOObjectRelease(current); return index }
-                    }
+                                                               0)?.takeRetainedValue() as? String,
+                   let index = portIndex(in: value) {
+                    IOObjectRelease(current)
+                    return index
                 }
+            }
+            var name = [CChar](repeating: 0, count: 128)
+            if IORegistryEntryGetName(current, &name) == KERN_SUCCESS,
+               let index = portIndex(in: String(cString: name)) {
+                IOObjectRelease(current)
+                return index
             }
             var parent: io_registry_entry_t = 0
             guard IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) == KERN_SUCCESS, parent != 0 else {
@@ -521,6 +618,7 @@ public final class DDCController {
 
     public struct DDCProbeResult {
         public let portIndex: Int?
+        public let monitor: MonitorIdentity?
         public let service: UInt
         public let writeResult: Int32
         public let readResult: Int32
@@ -548,6 +646,7 @@ public final class DDCController {
                 return readFn(candidate.service, chipAddress, dataAddress, base, UInt32(raw.count))
             }
             results.append(DDCProbeResult(portIndex: candidate.portIndex,
+                                          monitor: candidate.monitor,
                                           service: UInt(bitPattern: candidate.service),
                                           writeResult: writeResult,
                                           readResult: readResult,
