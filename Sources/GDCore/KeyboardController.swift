@@ -47,6 +47,22 @@ public final class KeyboardController: ObservableObject {
     /// Performs a volume key press routed to DDC.
     public var onVolumeKey: ((VolumeKey) -> Void)?
 
+    /// Thread-safe answer to "would a brightness key change any display right
+    /// now?". When it would not (every display mirrored, or keyboard control
+    /// switched off for all of them) the keys are left to macOS instead of
+    /// being swallowed with no effect.
+    private var brightnessHandling = true
+    public func setBrightnessKeyHandling(_ enabled: Bool) {
+        routingLock.lock(); brightnessHandling = enabled; routingLock.unlock()
+    }
+    private var isBrightnessHandlingEnabled: Bool {
+        routingLock.lock(); defer { routingLock.unlock() }
+        return brightnessHandling
+    }
+    /// Whether the brightness key press in progress is ours. Decided on the
+    /// key-down so its repeats and key-up take the same route (tap thread only).
+    private var brightnessPressRouted = true
+
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     /// The tap runs on its own thread: if it shared the main thread, any main
@@ -234,6 +250,8 @@ public final class KeyboardController: ObservableObject {
             }
             switch keyCode {
             case 2, 3:  // NX_KEYTYPE_BRIGHTNESS_UP / _DOWN
+                if isDown && data & 0x1 == 0 { brightnessPressRouted = isBrightnessHandlingEnabled }
+                guard brightnessPressRouted else { return Unmanaged.passUnretained(event) }
                 if isDown { adjust(keyCode == 2 ? 1 : -1, allowRepeat: true) }
                 return nil   // both down and up belong to us
             case 0, 1, 7:  // NX_KEYTYPE_SOUND_UP / _DOWN / _MUTE
@@ -271,7 +289,7 @@ public final class KeyboardController: ObservableObject {
             }
             // F14 / F15: the brightness keys on most non-Apple keyboards.
             let flags = nsEvent.modifierFlags.intersection([.command, .option, .control, .shift])
-            if flags.isEmpty {
+            if flags.isEmpty && isBrightnessHandlingEnabled {
                 if nsEvent.keyCode == 107 { adjust(-1, allowRepeat: true); return nil }
                 if nsEvent.keyCode == 113 { adjust(1, allowRepeat: true); return nil }
             }

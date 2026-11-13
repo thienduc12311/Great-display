@@ -2,6 +2,29 @@ import AppKit
 import GDCore
 import GDCBridge
 
+private func printError(_ text: String) {
+    FileHandle.standardError.write(Data((text + "\n").utf8))
+}
+
+/// A VCP code written in hex, with or without a `0x` prefix.
+private func parseHexByte(_ text: String) -> UInt8? {
+    let digits = text.lowercased().hasPrefix("0x") ? String(text.dropFirst(2)) : text
+    return UInt8(digits, radix: 16)
+}
+
+/// Connection commands persist a settings snapshot. A running GUI owns a
+/// separate snapshot, so it must be closed before the CLI changes this state.
+private func connectionCommandCanRun() -> Bool {
+    let bundleID = Bundle.main.bundleIdentifier ?? "app.greatdisplay.GreatDisplay"
+    let otherApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
+    guard !otherApp else {
+        printError("Quit Great Display before using --disconnect or --reconnect, or use its display controls while it is running.")
+        return false
+    }
+    return true
+}
+
 /// Command line helpers make the app testable without the menu bar UI.
 @MainActor
 func runCommandLine(_ arguments: [String]) -> Int32 {
@@ -60,7 +83,7 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
     case "--set-brightness":
         guard arguments.count >= 4,
               let id = UInt32(arguments[2]),
-              let value = Double(arguments[3]) else {
+              let value = Double(arguments[3]), value.isFinite else {
             FileHandle.standardError.write(Data("usage: --set-brightness <displayID> <0..1>\n".utf8))
             return 2
         }
@@ -69,9 +92,15 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             FileHandle.standardError.write(Data("unknown display \(id)\n".utf8))
             return 3
         }
-        DisplayController.shared.setBrightness(value, for: display)
-        DisplayController.shared.flushHardwareWrites()
-        print("brightness \(value) applied to \(display.name)")
+        // Written synchronously and directly. The menu's controller only
+        // learns on a later run-loop turn whether a monitor answers DDC, and
+        // its gamma-table fallback would not outlive this process anyway.
+        let level = max(0, min(1, value))
+        guard BrightnessEngine.shared.setHardwareBrightness(Float(level), display: id) else {
+            printError("\(display.name) has no hardware brightness control (native or DDC/CI)")
+            return 4
+        }
+        print("brightness \(level) applied to \(display.name)")
         return 0
 
     case "--ddc-read":
@@ -84,7 +113,12 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             return 3
         }
         // Optional extra hex codes: --ddc-read <id> 14 87
-        let extra = arguments.dropFirst(3).compactMap { UInt8($0, radix: 16) }
+        let requested = arguments.dropFirst(3)
+        let extra = requested.compactMap(parseHexByte)
+        guard extra.count == requested.count else {
+            printError("usage: --ddc-read <displayID> [vcpHex…]  (codes in hex, e.g. 14 or 0x14)")
+            return 2
+        }
         let codes: [UInt8] = extra.isEmpty
             ? DDCController.VCP.allCases.filter { ![.restoreFactoryDefaults, .restoreBrightnessContrast, .restoreColor].contains($0) }.map(\.rawValue)
             : extra
@@ -120,7 +154,10 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
         return 0
 
     case "--ddc-diag":
-        guard arguments.count >= 3, let id = UInt32(arguments[2]) else { return 2 }
+        guard arguments.count >= 3, let id = UInt32(arguments[2]) else {
+            printError("usage: --ddc-diag <displayID>")
+            return 2
+        }
         let results = DDCController.shared.probeAll(display: id)
         print("unit=\(CGDisplayUnitNumber(id)) services=\(results.count)")
         for result in results {
@@ -132,8 +169,8 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
     case "--ddc-write":
         guard arguments.count >= 5,
               let id = UInt32(arguments[2]),
-              let code = UInt8(arguments[3], radix: 16),
-              let value = Int(arguments[4]) else {
+              let code = parseHexByte(arguments[3]),
+              let value = Int(arguments[4]), (0...0xFFFF).contains(value) else {
             FileHandle.standardError.write(Data("usage: --ddc-write <displayID> <vcpHex> <rawValue>\n".utf8))
             return 2
         }
@@ -148,7 +185,7 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
 
     case "--stream-test":
         guard arguments.count >= 4,
-              let parsedWidth = Int(arguments[2]),
+              let parsedWidth = Int(arguments[2]), (320...16384).contains(parsedWidth),
               let target = UInt32(arguments[3]) else {
             FileHandle.standardError.write(Data("usage: --stream-test <virtualWidth> <targetID> [holdSeconds]\n".utf8))
             return 2
@@ -242,7 +279,8 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
         return ok ? 0 : 4
 
     case "--hdr":
-        guard arguments.count >= 4, let id = UInt32(arguments[2]) else {
+        guard arguments.count >= 4, let id = UInt32(arguments[2]),
+              ["on", "off"].contains(arguments[3].lowercased()) else {
             FileHandle.standardError.write(Data("usage: --hdr <displayID> on|off\n".utf8))
             return 2
         }
@@ -255,6 +293,7 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             FileHandle.standardError.write(Data("usage: --disconnect <displayID> [reconnectAfterSeconds]\n".utf8))
             return 2
         }
+        guard connectionCommandCanRun() else { return 4 }
         DisplayManager.shared.refresh()
         guard DisplayManager.shared.disconnect(id) else {
             print(DisplayManager.shared.lastError ?? "disconnect failed")
@@ -271,6 +310,12 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             print("reconnect \(ok ? "sent" : "failed"); online displays: \(DisplayManager.shared.displays.map(\.id))")
             return ok ? 0 : 4
         }
+        // Record it where the app keeps its own disconnects, so the next
+        // launch lists the display and can reconnect it.
+        let store = SettingsStore.shared
+        store.state.disconnectedDisplays.removeAll { $0.id == id }
+        store.state.disconnectedDisplays.append(contentsOf: DisplayManager.shared.disconnected.filter { $0.id == id })
+        store.saveNow()
         return 0
 
     case "--reconnect":
@@ -278,25 +323,40 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             FileHandle.standardError.write(Data("usage: --reconnect <displayID>\n".utf8))
             return 2
         }
+        guard connectionCommandCanRun() else { return 4 }
         let ok = DisplayManager.shared.reconnect(id)
+        if ok {
+            SettingsStore.shared.state.disconnectedDisplays.removeAll { $0.id == id }
+            SettingsStore.shared.saveNow()
+        }
         print(ok ? "reconnect sent" : (DisplayManager.shared.lastError ?? "failed"))
         return ok ? 0 : 4
 
     case "--system-colors":
-        if arguments.count >= 4 {
+        var changeResult: Int32 = 0
+        if arguments.count >= 3 {
+            let usage = "usage: --system-colors [dark|nightshift|truetone on|off]"
+            guard arguments.count >= 4, ["on", "off"].contains(arguments[3].lowercased()) else {
+                printError(usage)
+                return 2
+            }
             let on = arguments[3].lowercased() == "on"
             switch arguments[2].lowercased() {
-            case "dark": _ = gd_set_dark_mode(on ? 1 : 0)
-            case "nightshift": _ = gd_set_night_shift(on ? 1 : 0)
-            case "truetone": _ = gd_set_true_tone(on ? 1 : 0)
+            case "dark": changeResult = gd_set_dark_mode(on ? 1 : 0)
+            case "nightshift": changeResult = gd_set_night_shift(on ? 1 : 0)
+            case "truetone": changeResult = gd_set_true_tone(on ? 1 : 0)
             default:
-                FileHandle.standardError.write(Data("usage: --system-colors [dark|nightshift|truetone on|off]\n".utf8))
+                printError(usage)
                 return 2
             }
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
         }
         func describe(_ value: Int32) -> String { value < 0 ? "unavailable" : (value == 1 ? "on" : "off") }
         print("dark mode: \(describe(gd_dark_mode()))  night shift: \(describe(gd_night_shift()))  true tone: \(describe(gd_true_tone()))")
+        if changeResult != 0 {
+            printError("could not change \(arguments[2].lowercased()) (\(changeResult))")
+            return 4
+        }
         return 0
 
     case "--adjust":
@@ -310,7 +370,10 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
         for argument in arguments.dropFirst(3) {
             let parts = argument.split(separator: "=", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { hold = Double(argument) ?? hold; continue }
-            let value = Double(parts[1]) ?? 0
+            guard let value = Double(parts[1]), value.isFinite else {
+                printError("invalid value in \"\(argument)\"")
+                return 2
+            }
             switch parts[0] {
             case "gamma": adjustments.gamma = value
             case "temperature": adjustments.temperature = value
@@ -322,6 +385,7 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             default: break
             }
         }
+        hold = hold.isFinite ? max(0, min(3600, hold)) : 3.0
         BrightnessEngine.shared.setImageAdjustments(adjustments, display: id)
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         var red = [CGGammaValue](repeating: 0, count: 256), green = red, blue = red
@@ -529,8 +593,11 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
     case "--audio-output":
         guard let device = AudioOutput.defaultDevice() else { print("no default output"); return 4 }
         print("default output: \(device.name)  displayAudio=\(device.isDisplayAudio)  softwareVolume=\(device.hasSoftwareVolume)")
+        // A diagnostic: it must not save anything or connect the user's
+        // virtual screens.
+        SettingsStore.shared.persistenceEnabled = false
         let controller = DisplayController.shared
-        controller.start()
+        controller.start(autoStartVirtualScreens: false)
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
         print("volume keys → \(controller.volumeKeyTarget()?.name ?? "macOS (not routed to DDC)")")
         return 0
@@ -542,8 +609,11 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             FileHandle.standardError.write(Data("usage: --ddc-burst <displayID>\n".utf8))
             return 2
         }
+        // A diagnostic: the brightness steps below must not be saved as the
+        // display's setting, and the user's virtual screens stay as they are.
+        SettingsStore.shared.persistenceEnabled = false
         let controller = DisplayController.shared
-        controller.start()
+        controller.start(autoStartVirtualScreens: false)
         for _ in 0..<30 where !(controller.display(id).map(controller.ddcAvailable) ?? false) {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
@@ -581,8 +651,15 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             return 2
         }
         let target: CGDirectDisplayID? = arguments[3].lowercased() == "off" ? nil : UInt32(arguments[3])
-        guard arguments[3].lowercased() == "off" || target != nil else { return 2 }
+        guard arguments[3].lowercased() == "off" || target != nil else {
+            printError("usage: --mirror <sourceID> <targetID|off>")
+            return 2
+        }
         DisplayManager.shared.refresh()
+        if target == nil && DisplayManager.shared.liveMirrorTargets(of: source).isEmpty {
+            print("display \(source) is not being mirrored")
+            return 0
+        }
         let ok = DisplayManager.shared.setMirror(source: source, on: target)
         print(ok ? (target == nil ? "mirroring stopped" : "mirroring started")
                  : (DisplayManager.shared.lastError ?? "mirroring failed"))
@@ -620,7 +697,11 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             FileHandle.standardError.write(Data("usage: --create-virtual <width> <height> [holdSeconds]\n".utf8))
             return 2
         }
-        let holdSeconds = arguments.count > 4 ? (Double(arguments[4]) ?? 2.0) : 2.0
+        guard let holdSeconds = arguments.count > 4 ? Double(arguments[4]) : 2.0,
+              holdSeconds.isFinite else {
+            printError("holdSeconds must be a finite number")
+            return 2
+        }
         var configuration = VirtualScreenConfiguration()
         configuration.width = Int(width)
         configuration.height = Int(height)
@@ -647,9 +728,25 @@ let commands: Set<String> = ["--probe", "--set-brightness", "--set-resolution", 
                              "--create-virtual", "--ddc-read", "--ddc-write", "--ddc-diag", "--ddc-caps", "--mirror",
                              "--rotate", "--hdr", "--disconnect", "--reconnect", "--system-colors", "--adjust", "--self-test", "--audio-output", "--ddc-burst",
                              "--mirror-demo", "--stream-check", "--stream-test"]
-if applicationArguments.count > 1, commands.contains(applicationArguments[1]) {
-    let code = MainActor.assumeIsolated { runCommandLine(applicationArguments) }
-    exit(code)
+/// Flags handled by the app itself after launch (development aids).
+let applicationFlags: Set<String> = ["--preview-menu", "--render-menu", "--show-settings"]
+if applicationArguments.count > 1 {
+    let first = applicationArguments[1]
+    if commands.contains(first) {
+        let code = MainActor.assumeIsolated { runCommandLine(applicationArguments) }
+        exit(code)
+    }
+    let usage = "commands:\n  " + commands.sorted().joined(separator: "\n  ")
+    if first == "--help" || first == "-h" {
+        print(usage)
+        exit(0)
+    }
+    // Anything else starting with "--" is a mistyped command. Falling through
+    // would start a second copy of the app next to the running one.
+    if first.hasPrefix("--") && !applicationFlags.contains(first) {
+        printError("unknown command \(first)\n\(usage)")
+        exit(2)
+    }
 }
 
 MainActor.assumeIsolated {

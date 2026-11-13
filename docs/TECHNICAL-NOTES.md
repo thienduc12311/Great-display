@@ -99,6 +99,15 @@ keys, so Settings > Keyboard & OSD and the menu show a conflict notice.
 real event path, and `log show --predicate 'subsystem == "app.greatdisplay"'`
 shows what the tap received.
 
+The `greatdisplay://…-test` links (`key-test`, `stream-self-test`,
+`stream-route-test`, `association-test`) are development aids: they create
+virtual screens, move the pointer and post key presses. Any app or web page can
+open a link, so they are ignored unless switched on:
+
+```sh
+defaults write app.greatdisplay.GreatDisplay GDTestLinks -bool YES
+```
+
 ## Permissions and signing
 
 Accessibility (brightness keys) and Screen Recording (streaming) grants are

@@ -156,7 +156,8 @@ int gd_display_set_enabled(uint32_t display_id, int enabled) {
         CGCancelDisplayConfiguration(config);
         return (int)error;
     }
-    // Session scope: a crash or logout reconnects the display.
+    // Session scope: the display stays disconnected until it is reconnected or
+    // the user logs out, also when this app quits or crashes meanwhile.
     error = CGCompleteDisplayConfiguration(config, kCGConfigureForSession);
     return error == kCGErrorSuccess ? 0 : (int)error;
 }

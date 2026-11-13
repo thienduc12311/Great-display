@@ -33,6 +33,36 @@ public final class VirtualScreenManager: ObservableObject {
         configuration.allowOver8K ? 16384 : 7680
     }
 
+    /// Smallest logical side of a virtual screen, in points.
+    public static let minimumSide = 320
+    /// Widest shape a virtual screen may have (long side : short side).
+    public static let maximumAspect = 6.0
+
+    /// The same configuration with a geometry the system can represent: the
+    /// aspect ratio within bounds, the framebuffer within the pixel ceiling
+    /// and both sides at least the minimum. The screen is scaled as a whole,
+    /// so its shape is kept; clamping each side on its own would distort it
+    /// (a 5120 × 1440 HiDPI screen would become 3840 × 1440).
+    public static func fitted(_ configuration: VirtualScreenConfiguration) -> VirtualScreenConfiguration {
+        var width = Double(max(1, configuration.width))
+        var height = Double(max(1, configuration.height))
+        if width / height > maximumAspect { height = width / maximumAspect }
+        if height / width > maximumAspect { width = height / maximumAspect }
+        let limit = Double(maximumPixels(for: configuration) / (configuration.hiDPI ? 2 : 1))
+        let over = max(width, height) / limit
+        if over > 1 { width /= over; height /= over }
+        let under = Double(minimumSide) / min(width, height)
+        if under > 1 { width *= under; height *= under }
+        var result = configuration
+        result.width = Int((width / 2).rounded()) * 2
+        result.height = Int((height / 2).rounded()) * 2
+        return result
+    }
+
+    /// Off for command line diagnostics: association rules and auto-start
+    /// must not connect, mirror or stream the user's saved screens there.
+    public var automaticConnectionEnabled = true
+
     private init() {
         // Associated displays: connect/disconnect and stream with the physical display.
         DisplayManager.shared.$displays
@@ -92,6 +122,7 @@ public final class VirtualScreenManager: ObservableObject {
 
     @discardableResult
     public func create(_ configuration: VirtualScreenConfiguration) -> CGDirectDisplayID? {
+        let configuration = Self.fitted(configuration)
         guard isSupported else {
             lastError = String(cString: gd_virtual_display_error())
             return nil
@@ -176,6 +207,7 @@ public final class VirtualScreenManager: ObservableObject {
     /// keeps its display ID: the new mode list is applied in place, and only if
     /// the system refuses that is the screen reconnected.
     public func update(_ configuration: VirtualScreenConfiguration) {
+        let configuration = Self.fitted(configuration)
         if let index = SettingsStore.shared.state.virtualScreens.firstIndex(where: { $0.id == configuration.id }) {
             SettingsStore.shared.state.virtualScreens[index] = configuration
         }
@@ -220,6 +252,7 @@ public final class VirtualScreenManager: ObservableObject {
 
     /// Screens with a (re)creation scheduled; association rules leave them alone.
     private var pendingCreates: Set<UUID> = []
+    private var creationGeneration = UUID()
 
     public func isCreationPending(_ configuration: VirtualScreenConfiguration) -> Bool {
         pendingCreates.contains(configuration.id)
@@ -230,8 +263,12 @@ public final class VirtualScreenManager: ObservableObject {
     private func scheduleCreate(_ configuration: VirtualScreenConfiguration, after delay: TimeInterval) {
         guard !pendingCreates.contains(configuration.id) else { return }
         pendingCreates.insert(configuration.id)
+        let generation = creationGeneration
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            // Reset/teardown invalidates sleeping work without letting an old
+            // task remove a newer request for the same screen.
+            guard generation == self.creationGeneration else { return }
             self.pendingCreates.remove(configuration.id)
             guard self.handles[configuration.id] == nil else { return }
             let saved = SettingsStore.shared.state.virtualScreens.first { $0.id == configuration.id }
@@ -244,7 +281,8 @@ public final class VirtualScreenManager: ObservableObject {
     public func destroy(_ id: UUID) {
         guard let handle = handles.removeValue(forKey: id) else { return }
         if let screen = active.first(where: { $0.id == id }) {
-            FullScreenStreamController.shared.stop(source: screen.displayID)
+            // Not a user stop: the stream may resume when the screen returns.
+            FullScreenStreamController.shared.stop(source: screen.displayID, byUser: false)
             DisplayManager.shared.releaseMirrors(sourcing: screen.displayID)
             DisplayManager.virtualDisplayIDs.remove(screen.displayID)
         }
@@ -255,13 +293,15 @@ public final class VirtualScreenManager: ObservableObject {
     }
 
     public func destroyAll() {
+        creationGeneration = UUID()
+        pendingCreates.removeAll()
         for id in Array(handles.keys) { destroy(id) }
     }
 
     public func startAutoStartScreens() {
         for configuration in SettingsStore.shared.state.virtualScreens where configuration.autoStart {
             // Screens tied to a display follow that display instead.
-            if configuration.isAssociated && (configuration.connectWithAssociated || configuration.connectWhenAssociatedOffline) { continue }
+            if configuration.connectionFollowsAssociation { continue }
             if active.contains(where: { $0.id == configuration.id }) { continue }
             _ = create(configuration)
         }
@@ -286,6 +326,7 @@ public final class VirtualScreenManager: ObservableObject {
     ///   one when mirroring already uses the first);
     /// - follow the associated display's orientation.
     private func applyAssociations(_ displays: [DisplayInfo]) {
+        guard automaticConnectionEnabled else { return }
         for var configuration in SettingsStore.shared.state.virtualScreens where configuration.isAssociated {
             let ownID = displayID(for: configuration)
             let online = configuration.associatedDisplayIdentities.compactMap { identity in
@@ -324,6 +365,9 @@ public final class VirtualScreenManager: ObservableObject {
             } else if configuration.followOrientation, portrait != (configuration.height > configuration.width) {
                 swap(&shaped.width, &shaped.height)
             }
+            // Compare the geometry update() will actually save so an extreme
+            // associated aspect cannot keep deferring mirroring and streaming.
+            shaped = Self.fitted(shaped)
             if shaped.width != configuration.width || shaped.height != configuration.height {
                 configuration = shaped
                 update(configuration)
@@ -337,20 +381,19 @@ public final class VirtualScreenManager: ObservableObject {
                 : nil
 
             if let mirrorTarget, DisplayManager.shared.mirrorTarget(for: virtualID) != mirrorTarget.id {
-                FullScreenStreamController.shared.stop(source: virtualID)
+                FullScreenStreamController.shared.stop(source: virtualID, byUser: false)
                 _ = DisplayManager.shared.setMirror(source: virtualID, on: mirrorTarget.id)
             }
-            if let streamTarget, FullScreenStreamController.shared.stream(for: virtualID)?.target != streamTarget.id {
+            // Not again after the user stopped it by hand; a reconnect of either
+            // display re-arms it.
+            let stoppedByUser = displays.first { $0.id == virtualID }
+                .map { FullScreenStreamController.shared.wasStoppedByUser(sourceIdentity: $0.identity) } ?? false
+            if let streamTarget, !stoppedByUser,
+               FullScreenStreamController.shared.stream(for: virtualID)?.target != streamTarget.id {
                 Task { @MainActor in
                     _ = await FullScreenStreamController.shared.start(source: virtualID, on: streamTarget.id, activate: false)
                 }
             }
-        }
-    }
-
-    private func saveConfiguration(_ configuration: VirtualScreenConfiguration) {
-        if let index = SettingsStore.shared.state.virtualScreens.firstIndex(where: { $0.id == configuration.id }) {
-            SettingsStore.shared.state.virtualScreens[index] = configuration
         }
     }
 }

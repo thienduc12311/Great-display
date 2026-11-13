@@ -49,7 +49,9 @@ typedef id (*GDInitDisplayIMP)(id, SEL, id);
 - (instancetype)initWithDescriptor:(id)descriptor;
 - (instancetype)initWithWidth:(unsigned int)width height:(unsigned int)height refreshRate:(double)refreshRate;
 @end
-typedef int (*GDApplySettingsIMP)(id, SEL, id);
+// applySettings: returns BOOL. Calling it through an int-returning signature
+// reads register bits the callee never set (visible on Intel).
+typedef BOOL (*GDApplySettingsIMP)(id, SEL, id);
 
 GDVirtualDisplayRef *gd_virtual_display_create(const char *name,
                                                uint32_t width,
@@ -306,7 +308,9 @@ int gd_virtual_display_set_modes(GDVirtualDisplayRef *ref,
     @try {
         id display = (__bridge id)ref->display;
         NSArray *modes = gd_make_modes(modeClass, pixel_widths, pixel_heights, count, refresh_rate);
-        return gd_apply_modes(display, modes, hidpi) ? 0 : -2;
+        // gd_apply_modes returns -1 when it could not even try; only a positive
+        // answer counts, so the caller falls back to reconnecting otherwise.
+        return gd_apply_modes(display, modes, hidpi) > 0 ? 0 : -2;
     } @catch (NSException *exception) {
         gd_set_error([NSString stringWithFormat:@"%@: %@", exception.name, exception.reason]);
         return -3;

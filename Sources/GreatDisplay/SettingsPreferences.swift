@@ -8,7 +8,7 @@ import ServiceManagement
 struct GeneralSettingsView: View {
     @ObservedObject private var store = SettingsStore.shared
     @ObservedObject private var sleep = SleepController.shared
-    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var launchAtLogin = Self.loginItemRegistered
     @State private var status: String?
     @State private var showDiagnostics = false
 
@@ -17,8 +17,8 @@ struct GeneralSettingsView: View {
                      symbol: "gearshape.fill", tint: .gray) {
             SettingsSectionTitle(title: "Startup", symbol: "power")
             SettingsCard {
-                SettingsToggleRow(title: "Launch at login", help: "Starts Great Display when you log in.", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, newValue in updateLoginItem(newValue) }
+                SettingsToggleRow(title: "Launch at login", help: "Starts Great Display when you log in.",
+                                  isOn: Binding(get: { launchAtLogin }, set: { updateLoginItem($0) }))
                 SettingsRowDivider()
                 SettingsToggleRow(title: "Restore display configuration on launch",
                                   help: "Re-applies saved resolutions, arrangement and main display.",
@@ -102,27 +102,46 @@ struct GeneralSettingsView: View {
         .padding(.vertical, 5)
     }
 
+    private static var loginItemRegistered: Bool {
+        let state = SMAppService.mainApp.status
+        return state == .enabled || state == .requiresApproval
+    }
+
     private func updateLoginItem(_ enabled: Bool) {
         do {
-            if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-            store.state.general.launchAtLogin = enabled
+            // Pending approval still means registered, so switching off must
+            // unregister it instead of treating it as already disabled.
+            if enabled != Self.loginItemRegistered {
+                if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            }
             status = nil
         } catch {
             status = "Could not update the login item: \(error.localizedDescription)"
         }
+        // Only the binding setter performs system actions. Updating these
+        // values after an error cannot trigger another registration attempt.
+        launchAtLogin = Self.loginItemRegistered
+        store.state.general.launchAtLogin = launchAtLogin
     }
 
     private func confirmReset() {
         let alert = NSAlert()
         alert.messageText = "Reset all saved settings?"
-        alert.informativeText = "Saved display configurations, image adjustments, per-display preferences and virtual screen definitions are removed."
+        alert.informativeText = "Everything returns to its defaults: application, menu and keyboard preferences, saved display configurations, image adjustments, per-display preferences, stream options and virtual screen definitions. Connected virtual screens are disconnected and running streams stop."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Reset")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
             let controller = DisplayController.shared
             for display in controller.displays { controller.resetImageAdjustments(for: display) }
+            // Their definitions are about to go: a screen or stream left
+            // running would have no page to stop it from.
+            FullScreenStreamController.shared.stopAll()
+            VirtualScreenManager.shared.destroyAll()
             store.resetAll()
+            // Brightness key handling is on by default again; the tap only
+            // starts here when Accessibility access is already granted.
+            if store.state.general.handleBrightnessKeys { _ = KeyboardController.shared.start() }
         }
     }
 }

@@ -9,6 +9,89 @@ change under **Unreleased** in the same pull request.
 
 ## [Unreleased]
 
+### Changed
+
+- The development test links (`greatdisplay://stream-self-test`,
+  `stream-route-test`, `association-test`, `key-test`, `probe`) are ignored
+  unless switched on with
+  `defaults write app.greatdisplay.GreatDisplay GDTestLinks -bool YES`. Any app
+  or web page could open them, and they create virtual screens, move the
+  pointer and post key presses.
+- A virtual screen that connects through its association rule can no longer be
+  connected or disconnected by hand (the rule undid that moments later); the
+  switch and the menu item are disabled and say why.
+- With combined brightness on, Settings no longer shows a separate software
+  dimming slider. Moving it made the brightness slider jump, and the next touch
+  dropped the backlight.
+- Virtual screen sizes are scaled as a whole to the 8K/16K ceiling. The 32:9
+  preset and "match a display" used to be clamped per side, which distorted
+  them.
+- **Reset All Saved Settings** says what it resets (everything, including
+  application, menu and keyboard preferences), disconnects virtual screens and
+  stops streams, and keeps track of displays that are still disconnected.
+- An unknown command line option prints the list of commands and exits with
+  status 2 instead of starting a second copy of the app. `--help` is new.
+- `--set-brightness` only reports success when the hardware accepted the value.
+
+### Fixed
+
+- A DDC capabilities read could use a released service when another thread
+  invalidated the monitor binding between reply fragments.
+- Turning off Launch at login while approval was pending did not unregister it.
+- A display ID reused by another monitor could inherit its old gamma table
+  and software dimming.
+- `--create-virtual` rejects non-finite or malformed hold durations before
+  creating a display. Connection CLI commands refuse to run alongside the GUI
+  to avoid overwriting each other's saved disconnect state.
+- A stream that the system ended (sleep, the stop-sharing control) left its
+  window over the display showing the last frame; the stream is now removed.
+- Esc did not stop a stream, because the stream window could not receive key
+  presses.
+- "Resume on Connect" and auto-streaming restarted a stream the user had just
+  stopped on any display change. A manual stop now holds until a display
+  reconnects.
+- A stream kept its old capture size and crop after the source changed mode in
+  place (rotation, HiDPI toggle).
+- A virtual screen could be bound to a real monitor's DDC/CI channel and then
+  drive that monitor's brightness, volume and input. DDC services are now
+  claimed per registry entry, released when unused, and freed when a monitor is
+  unplugged.
+- A crash when stepping the resolution of a virtual screen whose custom ratio
+  had rounded one side to zero, or when `inf` was typed into a ratio field.
+- A failed display configuration could be cancelled after it had already been
+  completed, and reported error 0.
+- Moving a mirror to another display left the previous target mirrored with no
+  way to release it. Mirroring started by `--mirror` or an earlier launch can
+  be stopped again (`--mirror <id> off` and the menu did nothing).
+- Saved display configurations were restored to the display ID they were saved
+  with, not the display they belong to, so they were skipped or applied to the
+  wrong monitor after a reboot or port change.
+- The brightness keys were swallowed with no effect while displays were
+  mirrored or keyboard control was off for every display; they now go to macOS.
+- Dimming and image adjustments are applied again after a display reconnects
+  or wakes, and a colour profile changed after a resolution change is no
+  longer overwritten.
+- Software brightness set with the slider was not saved with the display's
+  configuration; **Reset Brightness and Dimming** was not saved and could stall
+  the menu on a slow monitor.
+- A refused live resize of a virtual screen was treated as success.
+- Deep links that launch the app (`greatdisplay://settings`) were dropped.
+- Quitting through `kill` or Ctrl-C skipped reconnecting displays and
+  restoring colour tables.
+- Raw VCP writes of reset, input and power codes ask first, validate the value
+  and refresh the controls; **Discard Virtual Screen** in the menu and
+  disconnecting the main display from Settings ask first, like their
+  counterparts.
+- **Launch at login** showed On after registration failed.
+- Command line: `--rotate` and `--stream-test` no longer crash on out-of-range
+  numbers; `--ddc-write` and `--ddc-read` accept `0x` codes and reject bad
+  ones; `--hdr`, `--system-colors` and `--adjust` reject invalid values and
+  report failures; `--audio-output` and `--ddc-burst` no longer connect saved
+  virtual screens or save test values; `--disconnect` is remembered on the
+  app's next launch (the GUI must remain closed while the command runs).
+- Release builds fail when the app's code signature does not verify, instead
+  of being packaged anyway. CI now launches the built app.
+
 ## [1.1.0] - 2026-11-12
 
 ### Added

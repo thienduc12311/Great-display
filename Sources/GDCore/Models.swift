@@ -99,6 +99,8 @@ public struct DisplayInfo: Identifiable, Hashable {
     public static func == (lhs: DisplayInfo, rhs: DisplayInfo) -> Bool {
         lhs.id == rhs.id &&
         lhs.name == rhs.name &&
+        lhs.identity == rhs.identity &&
+        lhs.isVirtual == rhs.isVirtual &&
         lhs.isMain == rhs.isMain &&
         lhs.isMirrored == rhs.isMirrored &&
         lhs.isAsleep == rhs.isAsleep &&
@@ -115,7 +117,8 @@ public struct DisplayInfo: Identifiable, Hashable {
         hasher.combine(id)
         hasher.combine(name)
         hasher.combine(isMain)
-        hasher.combine(currentMode?.id)
+        // Not the current mode's id: `==` compares modes by geometry, and two
+        // equal values must hash alike.
     }
 }
 

@@ -227,6 +227,10 @@ public final class DisplayManager: ObservableObject {
 
     @discardableResult
     public func setRotation(_ degrees: Int, for id: CGDirectDisplayID) -> Bool {
+        guard [0, 90, 180, 270].contains(degrees) else {
+            lastError = "Rotation must be 0, 90, 180 or 270 degrees."
+            return false
+        }
         let result = gd_display_set_rotation(id, Int32(degrees))
         guard result == 0 else {
             lastError = result == -2 ? "This display cannot be rotated." : "Rotation is unavailable on this system."
@@ -347,13 +351,20 @@ public final class DisplayManager: ObservableObject {
             return false
         }
         let result = body(config)
-        if result == .success, CGCompleteDisplayConfiguration(config, .forSession) == .success {
-            refresh()
-            return true
+        guard result == .success else {
+            CGCancelDisplayConfiguration(config)
+            lastError = "Display configuration failed (\(result.rawValue))."
+            return false
         }
-        CGCancelDisplayConfiguration(config)
-        lastError = "Display configuration failed (\(result.rawValue))."
-        return false
+        // Completing consumes the configuration whether or not it succeeds, so
+        // it must not be cancelled afterwards.
+        let completed = CGCompleteDisplayConfiguration(config, .forSession)
+        guard completed == .success else {
+            lastError = "Display configuration failed (\(completed.rawValue))."
+            return false
+        }
+        refresh()
+        return true
     }
 
     @discardableResult
@@ -401,26 +412,36 @@ public final class DisplayManager: ObservableObject {
     /// The density is strict: asking for HiDPI never silently falls back to a
     /// low-resolution mode (and the reverse), because that would look like a
     /// successful change while the pixels are actually different.
+    ///
+    /// Modes the display reports as usable for the desktop are preferred over
+    /// unusable ones of the same size; `usableOnly` refuses the latter outright
+    /// (used when re-applying a saved configuration unattended).
     @discardableResult
     public func setResolution(width: Int, height: Int, hiDPI: Bool, refreshRate: Double? = nil,
-                              for id: CGDirectDisplayID) -> Bool {
+                              usableOnly: Bool = false, for id: CGDirectDisplayID) -> Bool {
         guard let display = display(id: id) else {
             lastError = "Display \(id) is not connected."
             return false
         }
-        let candidates = display.modes.filter {
+        let matching = display.modes.filter {
             $0.width == width && $0.height == height && $0.isHiDPI == hiDPI
         }
+        let usable = matching.filter(\.isUsable)
+        let candidates = usable.isEmpty && !usableOnly ? matching : usable
         guard !candidates.isEmpty else {
             lastError = "No \(hiDPI ? "HiDPI" : "low resolution") mode for \(width) × \(height) on \(display.name)."
             return false
         }
         // Prefer the refresh rate the display is currently running at, otherwise
         // the highest available one.
-        let reference = refreshRate ?? display.currentMode?.refreshRate ?? 0
-        let mode = candidates.min {
-            abs($0.refreshRate - reference) < abs($1.refreshRate - reference)
-        } ?? candidates[0]
+        let mode: ModeInfo
+        if let reference = refreshRate ?? display.currentMode?.refreshRate {
+            mode = candidates.min {
+                abs($0.refreshRate - reference) < abs($1.refreshRate - reference)
+            } ?? candidates[0]
+        } else {
+            mode = candidates.max { $0.refreshRate < $1.refreshRate } ?? candidates[0]
+        }
         return setMode(mode.mode, for: id)
     }
 
@@ -447,7 +468,12 @@ public final class DisplayManager: ObservableObject {
     public func setMirror(source: CGDirectDisplayID, on target: CGDirectDisplayID?) -> Bool {
         if let target {
             guard target != source else { return false }
-            if mirrorTargets[source] == nil, let mode = CGDisplayCopyDisplayMode(target) {
+            // Moving the mirror to another display: release the previous target
+            // first, or it would stay in the mirror set with nothing tracking it.
+            if let previous = mirrorTargets[source], previous != target {
+                guard setMirror(source: source, on: nil) else { return false }
+            }
+            if mirrorTargets[source] != target, let mode = CGDisplayCopyDisplayMode(target) {
                 preMirrorModes[target] = mode
             }
             let ok = perform { CGConfigureDisplayMirrorOfDisplay($0, target, source) }
@@ -455,18 +481,41 @@ public final class DisplayManager: ObservableObject {
             return ok
         }
 
-        guard let previous = mirrorTargets[source] else { return true }
-        let ok = perform { CGConfigureDisplayMirrorOfDisplay($0, previous, kCGNullDirectDisplay) }
+        // The target this process set up, else whatever the window server
+        // reports: a mirror started by an earlier launch or by the command line
+        // is not in `mirrorTargets` but must still be removable.
+        var targets = mirrorTargets[source].map { [$0] } ?? liveMirrorTargets(of: source)
+        // A target that was unplugged meanwhile has nothing left to undo.
+        targets.removeAll { CGDisplayIsOnline($0) == 0 }
+        guard !targets.isEmpty else {
+            mirrorTargets.removeValue(forKey: source)
+            return true
+        }
+        let ok = perform { config in
+            for target in targets {
+                let error = CGConfigureDisplayMirrorOfDisplay(config, target, kCGNullDirectDisplay)
+                if error != .success { return error }
+            }
+            return .success
+        }
         guard ok else { return false }
         mirrorTargets.removeValue(forKey: source)
-        if let saved = preMirrorModes.removeValue(forKey: previous) {
-            _ = setMode(saved, for: previous)
+        for target in targets {
+            if let saved = preMirrorModes.removeValue(forKey: target) {
+                _ = setMode(saved, for: target)
+            }
         }
         return true
     }
 
+    /// Online displays that currently show `source`'s content, according to
+    /// the window server (independent of which process started the mirror).
+    public func liveMirrorTargets(of source: CGDirectDisplayID) -> [CGDirectDisplayID] {
+        displays.map(\.id).filter { $0 != source && CGDisplayMirrorsDisplay($0) == source }
+    }
+
     public func mirrorTarget(for source: CGDirectDisplayID) -> CGDirectDisplayID? {
-        mirrorTargets[source]
+        mirrorTargets[source] ?? liveMirrorTargets(of: source).first
     }
 
     /// Used when a mirror source disappears without an explicit un-mirror.
@@ -498,7 +547,14 @@ public final class DisplayManager: ObservableObject {
 
     @discardableResult
     public func move(_ id: CGDirectDisplayID, to point: CGPoint) -> Bool {
-        perform { CGConfigureDisplayOrigin($0, id, Int32(point.x.rounded()), Int32(point.y.rounded())) }
+        // The origin can come from a settings file: converting a non-finite or
+        // out-of-range value to Int32 would trap.
+        let limit: CGFloat = 1_000_000
+        guard point.x.isFinite, point.y.isFinite, abs(point.x) < limit, abs(point.y) < limit else {
+            lastError = "Display position is out of range."
+            return false
+        }
+        return perform { CGConfigureDisplayOrigin($0, id, Int32(point.x.rounded()), Int32(point.y.rounded())) }
     }
 
     /// Rotates the display a further 90° clockwise.
@@ -508,9 +564,14 @@ public final class DisplayManager: ObservableObject {
         return setRotation((max(0, current) + 90) % 360, for: id)
     }
 
-    /// Re-applies a saved configuration. Returns true when everything applied.
-    public func restore(configuration: DisplayConfiguration) -> Bool {
-        guard let display = display(id: configuration.displayID) else { return false }
+    /// Re-applies a saved configuration to the display `id`. Returns true when
+    /// everything applied.
+    ///
+    /// The caller matches the configuration to a display by identity; the
+    /// display ID saved inside it is not used, because macOS can hand a monitor
+    /// a different ID after a reboot or when it moves to another port.
+    public func restore(configuration: DisplayConfiguration, to id: CGDirectDisplayID) -> Bool {
+        guard let display = display(id: id) else { return false }
         var ok = true
         if let width = configuration.logicalWidth, let height = configuration.logicalHeight {
             let hiDPI = configuration.hiDPI ?? false
@@ -519,16 +580,17 @@ public final class DisplayManager: ObservableObject {
             // Keep the refresh rate: the saved one, else the one running now.
             // (Picking the first match used to drop 60 Hz panels to 30 Hz.)
             if !alreadyThere {
+                // Unattended: never re-apply a mode the display cannot show.
                 ok = setResolution(width: width, height: height, hiDPI: hiDPI,
                                    refreshRate: configuration.refreshRate ?? current?.refreshRate,
-                                   for: configuration.displayID) && ok
+                                   usableOnly: true, for: id) && ok
             }
         }
         if let origin = configuration.origin {
-            ok = move(configuration.displayID, to: origin) && ok
+            ok = move(id, to: origin) && ok
         }
         if configuration.isMain {
-            ok = setMain(configuration.displayID) && ok
+            ok = setMain(id) && ok
         }
         return ok
     }

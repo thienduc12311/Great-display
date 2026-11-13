@@ -55,6 +55,9 @@ public final class OSDController {
 
     private var panel: NSPanel?
     private var hideWorkItem: DispatchWorkItem?
+    /// Counts calls to `show`, so a fade-out that finishes after a newer
+    /// `show` does not hide what that one just put on screen.
+    private var generation = 0
 
     private init() {}
 
@@ -89,13 +92,18 @@ public final class OSDController {
         }
 
         hideWorkItem?.cancel()
+        generation += 1
+        let shown = generation
         let item = DispatchWorkItem { [weak panel] in
             guard let panel else { return }
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.25
                 panel.animator().alphaValue = 0
             }, completionHandler: {
-                panel.orderOut(nil)
+                MainActor.assumeIsolated {
+                    guard OSDController.shared.generation == shown else { return }
+                    panel.orderOut(nil)
+                }
             })
         }
         hideWorkItem = item

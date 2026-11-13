@@ -9,9 +9,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: SettingsWindowController?
     private var previewWindow: NSWindow?
     private var volumeRoutingTimer: Timer?
+    private var signalSources: [DispatchSourceSignal] = []
+    /// Links that arrived before the controllers existed. A link that launches
+    /// the app is delivered ahead of `applicationDidFinishLaunching`.
+    private var pendingURLs: [URL] = []
+    private var didFinishLaunching = false
+    /// One development test at a time: each snapshots and restores the settings.
+    private var testRunning = false
+
+    /// The `greatdisplay://…-test` links create virtual screens, move the
+    /// pointer and post key presses. Any app or web page can open a link, so
+    /// they only work when switched on for development:
+    /// `defaults write app.greatdisplay.GreatDisplay GDTestLinks -bool YES`
+    /// (or launch with `-GDTestLinks YES`).
+    private var testLinksEnabled: Bool { UserDefaults.standard.bool(forKey: "GDTestLinks") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        installTerminationSignalHandlers()
 
         menuBar = MenuBarController()
         settings = SettingsWindowController.shared
@@ -42,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         volumeRoutingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             MainActor.assumeIsolated {
                 KeyboardController.shared.setVolumeKeyRouting(DisplayController.shared.volumeKeyTarget() != nil)
+                KeyboardController.shared.setBrightnessKeyHandling(DisplayController.shared.hasBrightnessKeyTargets)
             }
         }
         keyboard.startMonitoringTrust()
@@ -87,6 +103,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.settings?.show()
             }
         }
+
+        didFinishLaunching = true
+        let urls = pendingURLs
+        pendingURLs = []
+        if !urls.isEmpty { open(urls) }
+    }
+
+    /// `kill`, a logout script or Ctrl-C would otherwise end the process
+    /// without `applicationWillTerminate`, leaving displays disconnected and
+    /// colour tables dimmed. Route them through a normal quit.
+    private func installTerminationSignalHandlers() {
+        for number in [SIGTERM, SIGINT] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { MainActor.assumeIsolated { NSApp.terminate(nil) } }
+            source.resume()
+            signalSources.append(source)
+        }
     }
 
     /// Creates a temporary virtual screen, self-streams it with options, checks
@@ -99,8 +133,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             configuration.name = "Great Display Stream Test"
             configuration.width = 1280
             configuration.height = 720
+            guard !testRunning else { log("another test is running"); return }
+            testRunning = true
             let store = SettingsStore.shared
             let saved = store.state
+            store.persistenceEnabled = false
+            defer {
+                // Also on the early exits below: removes the screen (and with
+                // it the stream) and puts the user's settings back.
+                VirtualScreenManager.shared.destroy(configuration.id)
+                store.state = saved
+                store.persistenceEnabled = true
+                testRunning = false
+            }
             guard let id = VirtualScreenManager.shared.create(configuration) else { log("FAIL create"); return }
             try? await Task.sleep(nanoseconds: 2_500_000_000)
             DisplayManager.shared.refresh()
@@ -133,9 +178,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             FullScreenStreamController.shared.stop(source: id)
-            VirtualScreenManager.shared.destroy(configuration.id)
-            store.state = saved
-            store.saveNow()
             log("done")
         }
     }
@@ -148,6 +190,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             func log(_ text: String) { keyboardLog.notice("association-test: \(text, privacy: .public)") }
             func check(_ name: String, _ ok: Bool, _ detail: String = "") { log("\(ok ? "PASS" : "FAIL") \(name)\(detail.isEmpty ? "" : " — \(detail)")") }
             func wait(_ seconds: Double) async { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+            guard !testRunning else { log("another test is running"); return }
+            testRunning = true
             let store = SettingsStore.shared
             let saved = store.state
             store.persistenceEnabled = false
@@ -157,6 +201,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             portrait.name = "GD Portrait"; portrait.width = 1080; portrait.height = 1920
             var follower = VirtualScreenConfiguration()
             follower.name = "GD Follower"; follower.width = 1920; follower.height = 1080
+            defer {
+                for configuration in [follower, portrait] { manager.destroy(configuration.id) }
+                store.state = saved
+                store.persistenceEnabled = true
+                testRunning = false
+            }
             follower.associatedDisplayIdentities = ["22136-4660-\(portrait.serialNumber)"]
             follower.connectWithAssociated = false
             follower.connectWhenAssociatedOffline = true
@@ -189,9 +239,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             check("enforces mirroring onto the associated display",
                   mirrored != nil && mirrored == manager.displayID(for: portrait))
 
-            for configuration in [follower, portrait] { manager.destroy(configuration.id) }
-            store.state = saved
-            store.persistenceEnabled = true
             log("done")
         }
     }
@@ -201,15 +248,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func runStreamRouteTest() {
         Task { @MainActor in
             func log(_ text: String) { keyboardLog.notice("route-test: \(text, privacy: .public)") }
+            guard !testRunning else { log("another test is running"); return }
+            testRunning = true
             let store = SettingsStore.shared
             let saved = store.state
             store.persistenceEnabled = false
-            defer {
-                store.state = saved
-                store.persistenceEnabled = true
-            }
             var a = VirtualScreenConfiguration(); a.name = "GD Route Source"; a.width = 1280; a.height = 720
             var b = VirtualScreenConfiguration(); b.name = "GD Route Target"; b.width = 1920; b.height = 1080
+            defer {
+                // Also on the early exits below (one screen created but not
+                // the other, no Screen Recording permission).
+                VirtualScreenManager.shared.destroy(a.id)
+                VirtualScreenManager.shared.destroy(b.id)
+                store.state = saved
+                store.persistenceEnabled = true
+                testRunning = false
+            }
             guard let sourceID = VirtualScreenManager.shared.create(a),
                   let targetID = VirtualScreenManager.shared.create(b) else { log("FAIL create"); return }
             try? await Task.sleep(nanoseconds: 2_800_000_000)
@@ -252,8 +306,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CGAssociateMouseAndMouseCursorPosition(1)
 
             streams.stop(source: sourceID)
-            VirtualScreenManager.shared.destroy(a.id)
-            VirtualScreenManager.shared.destroy(b.id)
             log("done")
         }
     }
@@ -367,8 +419,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        guard didFinishLaunching else {
+            pendingURLs.append(contentsOf: urls)
+            return
+        }
+        open(urls)
+    }
+
+    private func open(_ urls: [URL]) {
         for url in urls where url.scheme?.lowercased() == "greatdisplay" {
-            switch url.host?.lowercased() {
+            let host = url.host?.lowercased()
+            if let host, Self.testHosts.contains(host) {
+                if testLinksEnabled {
+                    runTestLink(host)
+                } else {
+                    keyboardLog.notice("ignored \(host, privacy: .public) link: test links are off (defaults key GDTestLinks)")
+                }
+                continue
+            }
+            switch host {
             case "settings", nil:
                 settings?.show()
             case "display":
@@ -379,25 +448,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             case "menu":
                 NotificationCenter.default.post(name: .greatDisplayShowMenu, object: nil)
-            case "association-test":
-                runAssociationTest()
-            case "stream-route-test":
-                runStreamRouteTest()
-            case "stream-self-test":
-                runStreamSelfTest()
-            case "key-test":
-                // Brightness down, then up again: net zero, exercises the tap.
-                KeyboardController.shared.postBrightnessKey(up: false)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    KeyboardController.shared.postBrightnessKey(up: true)
-                }
             case "brighten":
                 DisplayController.shared.brightenAll()
-            case "probe":
-                DisplayController.shared.start()
             default:
                 settings?.show()
             }
+        }
+    }
+
+    private static let testHosts: Set<String> = ["association-test", "stream-route-test", "stream-self-test",
+                                                 "key-test", "probe"]
+
+    private func runTestLink(_ host: String) {
+        switch host {
+        case "association-test":
+            runAssociationTest()
+        case "stream-route-test":
+            runStreamRouteTest()
+        case "stream-self-test":
+            runStreamSelfTest()
+        case "key-test":
+            // Brightness down, then up again: net zero, exercises the tap.
+            KeyboardController.shared.postBrightnessKey(up: false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                KeyboardController.shared.postBrightnessKey(up: true)
+            }
+        case "probe":
+            DisplayController.shared.redetect()
+        default:
+            break
         }
     }
 }

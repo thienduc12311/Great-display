@@ -32,6 +32,7 @@ jobs:
           SIGN_IDENTITY: "-"
           VERSION: 0.0.0-ci.${{ github.run_number }}
           BUILD_NUMBER: ${{ github.run_number }}
+          REQUIRE_VALID_SIGNATURE: "1"
         run: ./Scripts/build_app.sh release
 
       - name: Check bundle
@@ -39,6 +40,26 @@ jobs:
           lipo -info dist/GreatDisplay.app/Contents/MacOS/GreatDisplay
           plutil -lint dist/GreatDisplay.app/Contents/Info.plist
           codesign --verify --deep --strict --verbose=2 dist/GreatDisplay.app
+
+      # The build alone only proves the app compiles. Running it catches a
+      # binary that fails at launch, and checks the command line dispatch.
+      - name: Smoke test
+        run: |
+          APP=dist/GreatDisplay.app/Contents/MacOS/GreatDisplay
+          "${APP}" --help
+          "${APP}" --probe
+          if "${APP}" --no-such-command; then
+            echo "::error::an unknown command must exit with a non-zero status"
+            exit 1
+          fi
+          for HOLD in inf -inf nan invalid; do
+            STATUS=0
+            "${APP}" --create-virtual 1920 1080 "${HOLD}" || STATUS=$?
+            if [ "${STATUS}" -ne 2 ]; then
+              echo "::error::invalid hold duration ${HOLD} must exit 2 (got ${STATUS})"
+              exit 1
+            fi
+          done
 
       - name: Package
         env:

@@ -30,8 +30,14 @@ public final class FullScreenStreamController: ObservableObject {
     @Published public private(set) var lastError: String?
 
     private var sessions: [UUID: StreamSession] = [:]
-    private var windows: [UUID: NSWindow] = [:]
+    private var windows: [UUID: StreamWindow] = [:]
     private var starting: Set<CGDirectDisplayID> = []
+    /// Sources whose start was cancelled by a stop while it was still awaiting
+    /// the capture system.
+    private var cancelledStarts: Set<CGDirectDisplayID> = []
+    /// Source identities whose stream the user stopped. "Resume on Connect"
+    /// and auto-streaming leave these alone until one end reconnects.
+    private var stoppedByUser: Set<String> = []
     private var escapeMonitor: Any?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -65,6 +71,12 @@ public final class FullScreenStreamController: ObservableObject {
         active.first { $0.source == source }
     }
 
+    /// True after the user stopped the stream from this source, until either
+    /// of its displays reconnects or the stream is started again.
+    public func wasStoppedByUser(sourceIdentity: String) -> Bool {
+        stoppedByUser.contains(sourceIdentity)
+    }
+
     // MARK: Configuration
 
     /// The saved options for a source display (created with defaults on demand).
@@ -84,6 +96,7 @@ public final class FullScreenStreamController: ObservableObject {
         guard let stream = active.first(where: { identity(of: $0.source) == configuration.sourceIdentity }),
               let session = sessions[stream.id], let window = windows[stream.id] else { return }
         session.configuration = configuration
+        window.allowsKey = !stream.isSelfStream && !configuration.interactive
         window.alphaValue = configuration.alpha
         layout(stream: stream)
         session.applyFilter()
@@ -105,10 +118,7 @@ public final class FullScreenStreamController: ObservableObject {
     @discardableResult
     public func start(source: CGDirectDisplayID, on target: CGDirectDisplayID, activate: Bool = true) async -> Bool {
         guard !starting.contains(source) else { return false }
-        if let existing = stream(for: source) {
-            if existing.target == target { return true }
-            stop(existing.id)
-        }
+        if let existing = stream(for: source), existing.target == target { return true }
         if !CGPreflightScreenCaptureAccess() {
             _ = CGRequestScreenCaptureAccess()
             lastError = "Screen Recording permission is required. Enable it for Great Display in System Settings, then relaunch the app."
@@ -120,12 +130,22 @@ public final class FullScreenStreamController: ObservableObject {
             lastError = "One of the displays is no longer available."
             return false
         }
+        // Only now that the new target is known to be usable.
+        if let existing = stream(for: source) { stop(existing.id, byUser: false) }
+        stoppedByUser.remove(sourceInfo.identity)
         starting.insert(source)
-        defer { starting.remove(source) }
+        cancelledStarts.remove(source)
+        defer {
+            starting.remove(source)
+            cancelledStarts.remove(source)
+        }
 
         var configuration = configuration(forSource: sourceInfo)
         configuration.targetIdentity = targetInfo.identity
         let selfStream = source == target
+        // Kept outside `do` so a failure after the session exists can break
+        // the session/stream reference cycle.
+        var pendingSession: StreamSession?
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -149,14 +169,32 @@ public final class FullScreenStreamController: ObservableObject {
             layer.videoGravity = .resize
             let session = StreamSession(layer: layer, configuration: configuration)
             session.captureSize = captureConfig.pixelSize
+            session.sourceGeometry = Self.geometryKey(of: source)
             let stream = SCStream(filter: filter, configuration: captureConfig, delegate: session)
             session.stream = stream
+            pendingSession = session
             try stream.addStreamOutput(session, type: .screen, sampleHandlerQueue: session.queue)
             try await stream.startCapture()
+            // Stopped (or its display removed) while the capture was starting.
+            if cancelledStarts.contains(source) {
+                session.stop()
+                return false
+            }
 
             let window = makeWindow(on: targetScreen, layer: layer, selfStream: selfStream)
+            window.allowsKey = !selfStream && !configuration.interactive
             window.alphaValue = configuration.alpha
             let id = UUID()
+            // The capture system can end a stream on its own (sleep, the
+            // system's stop-sharing control). Without this the window would
+            // stay over the display showing its last frame.
+            session.onStopped = { [weak self, weak session] message in
+                MainActor.assumeIsolated {
+                    guard let self, let session, self.sessions[id] === session else { return }
+                    self.stop(id, byUser: false)
+                    self.lastError = "The stream ended: \(message)"
+                }
+            }
             let entry = ActiveStream(id: id, source: source, target: target,
                                      sourceName: sourceInfo.name, targetName: targetInfo.name)
             sessions[id] = session
@@ -182,12 +220,20 @@ public final class FullScreenStreamController: ObservableObject {
             lastError = nil
             return true
         } catch {
+            pendingSession?.stop()
             lastError = "Screen capture failed: \(error.localizedDescription)"
             return false
         }
     }
 
-    public func stop(_ id: UUID) {
+    /// Stops a stream. `byUser` is false when the stream ends for another
+    /// reason (its display went away, the capture ended, it is being moved),
+    /// which leaves "Resume on Connect" free to bring it back.
+    public func stop(_ id: UUID, byUser: Bool = true) {
+        if byUser, let stream = active.first(where: { $0.id == id }),
+           let sourceIdentity = sessions[id]?.configuration.sourceIdentity ?? identity(of: stream.source) {
+            stoppedByUser.insert(sourceIdentity)
+        }
         if let session = sessions.removeValue(forKey: id) {
             session.stop()
         }
@@ -204,13 +250,17 @@ public final class FullScreenStreamController: ObservableObject {
         updatePointerRouting()
     }
 
-    public func stop(source: CGDirectDisplayID) {
+    public func stop(source: CGDirectDisplayID, byUser: Bool = true) {
+        // A start still waiting for the capture system has no entry in
+        // `active` yet: flag it so it does not appear after this stop.
+        if starting.contains(source) { cancelledStarts.insert(source) }
         for stream in active where stream.source == source {
-            stop(stream.id)
+            stop(stream.id, byUser: byUser)
         }
     }
 
     public func stopAll() {
+        cancelledStarts.formUnion(starting)
         for stream in active {
             stop(stream.id)
         }
@@ -221,18 +271,56 @@ public final class FullScreenStreamController: ObservableObject {
     private func reconcile(with displays: [DisplayInfo]) {
         let ids = Set(displays.map(\.id))
         for stream in active where !ids.contains(stream.source) || !ids.contains(stream.target) {
-            stop(stream.id)
+            stop(stream.id, byUser: false)
         }
-        // Re-lay out after any target resolution change.
-        for stream in active { layout(stream: stream) }
+        // Follow source mode changes (size, density, rotation), then re-lay
+        // out for any target resolution change.
+        for stream in active {
+            refreshCaptureGeometry(of: stream)
+            layout(stream: stream)
+        }
+
+        // A manual stop holds until one end of the stream goes away: the
+        // next connect is then a real "connect" again.
+        let identities = Set(displays.map(\.identity))
+        let configurations = SettingsStore.shared.state.streams
+        stoppedByUser = stoppedByUser.filter { identity in
+            guard identities.contains(identity) else { return false }
+            guard let target = configurations.first(where: { $0.sourceIdentity == identity })?.targetIdentity else {
+                return true
+            }
+            return identities.contains(target)
+        }
 
         guard CGPreflightScreenCaptureAccess() else { return }
-        for configuration in SettingsStore.shared.state.streams where configuration.resumeOnConnect {
+        for configuration in configurations where configuration.resumeOnConnect
+            && !stoppedByUser.contains(configuration.sourceIdentity) {
             guard let source = displays.first(where: { $0.identity == configuration.sourceIdentity }),
                   let target = displays.first(where: { $0.identity == configuration.targetIdentity }),
                   !isStreaming(source: source.id) else { continue }
             Task { @MainActor in _ = await self.start(source: source.id, on: target.id, activate: false) }
         }
+    }
+
+    /// Points and pixels of a display's current mode, to notice when a
+    /// stream's capture configuration no longer fits its source.
+    private static func geometryKey(of display: CGDirectDisplayID) -> String {
+        guard let mode = CGDisplayCopyDisplayMode(display) else { return "" }
+        return "\(mode.width)x\(mode.height)@\(mode.pixelWidth)x\(mode.pixelHeight)"
+    }
+
+    /// Rebuilds the capture size and crop rectangle after the source changed
+    /// mode in place (a virtual screen following its display's orientation,
+    /// a HiDPI toggle). They are otherwise fixed when the stream starts.
+    private func refreshCaptureGeometry(of stream: ActiveStream) {
+        guard let session = sessions[stream.id] else { return }
+        let key = Self.geometryKey(of: stream.source)
+        guard !key.isEmpty, key != session.sourceGeometry,
+              let captureConfig = makeCaptureConfiguration(source: stream.source,
+                                                           configuration: session.configuration) else { return }
+        session.sourceGeometry = key
+        session.stream?.updateConfiguration(captureConfig) { _ in }
+        session.captureSize = captureConfig.pixelSize
     }
 
     /// Diagnostics: frames shown so far and the layer geometry of a stream.
@@ -352,6 +440,8 @@ public final class FullScreenStreamController: ObservableObject {
     public func mapToTarget(_ stream: ActiveStream, _ point: CGPoint) -> CGPoint? {
         guard let rect = pictureRects[stream.id], let configuration = sessions[stream.id]?.configuration else { return nil }
         let source = CGDisplayBounds(stream.source)
+        // A source that just went away reports empty bounds.
+        guard source.width > 0, source.height > 0 else { return nil }
         let crop = cropFractions(configuration)
         var s = ((point.x - source.minX) / source.width - crop.left) / max(0.01, 1 - crop.left - crop.right)
         var t = ((point.y - source.minY) / source.height - crop.top) / max(0.01, 1 - crop.top - crop.bottom)
@@ -495,14 +585,13 @@ public final class FullScreenStreamController: ObservableObject {
     public static let streamLevel = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
     public static let selfStreamLevel = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue - 1)
 
-    private func makeWindow(on screen: NSScreen, layer: AVSampleBufferDisplayLayer, selfStream: Bool) -> NSWindow {
-        let window = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    private func makeWindow(on screen: NSScreen, layer: AVSampleBufferDisplayLayer, selfStream: Bool) -> StreamWindow {
+        let window = StreamWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isOpaque = true
         window.backgroundColor = .black
-        // A stream onto another display sits just under the menu bar (above
-        // apps and the Dock) so the menu bar, its status items and our menu stay
-        // usable. A self-stream must cover the menu bar it transforms, but stays
-        // below menus and popovers so the app menu still opens on top.
+        // Both kinds cover the menu bar and stay below menus and popovers, so
+        // the app menu still opens on top; a self-stream sits higher, just
+        // under the menus, because it transforms everything beneath it.
         window.level = selfStream ? Self.selfStreamLevel : Self.streamLevel
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         window.hasShadow = false
@@ -568,6 +657,15 @@ private extension SCStreamConfiguration {
     var pixelSize: CGSize { CGSize(width: width, height: height) }
 }
 
+/// A borderless window cannot become key by default, so it never receives
+/// key presses: the Esc-to-stop shortcut needs the stream window to be key.
+/// Self-streams and interactive streams keep the default, since they leave
+/// keyboard focus with the apps they show.
+private final class StreamWindow: NSWindow {
+    var allowsKey = false
+    override var canBecomeKey: Bool { allowsKey }
+}
+
 /// Owns one capture stream, its display layer and the optional video filter.
 private final class StreamSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let layer: AVSampleBufferDisplayLayer
@@ -576,6 +674,11 @@ private final class StreamSession: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// Read on the main thread for layout; written on the main thread.
     var configuration: StreamConfiguration
     var captureSize: CGSize = .zero
+    /// The source's mode when the capture configuration was last built.
+    var sourceGeometry = ""
+    /// Called on the main thread when the capture system ends the stream
+    /// without being asked to.
+    var onStopped: ((String) -> Void)?
     /// Frames delivered to the layer (diagnostics).
     private(set) var framesShown = 0
 
@@ -675,12 +778,15 @@ private final class StreamSession: NSObject, SCStreamOutput, SCStreamDelegate, @
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        NSLog("Great Display: stream stopped with error %@", error.localizedDescription)
+        let message = error.localizedDescription
+        NSLog("Great Display: stream stopped with error %@", message)
+        DispatchQueue.main.async { [weak self] in self?.onStopped?(message) }
     }
 
     func stop() {
         let stream = self.stream
         self.stream = nil
+        onStopped = nil
         stream?.stopCapture(completionHandler: { _ in })
         layer.flushAndRemoveImage()
     }

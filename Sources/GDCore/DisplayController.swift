@@ -27,6 +27,8 @@ public final class DisplayController: ObservableObject {
     private let manager = DisplayManager.shared
     private let engine = BrightnessEngine.shared
     private let ddc = DDCController.shared
+    private var rememberedDimming: [String: Double] = [:]
+    private var displayGenerations: [CGDirectDisplayID: UInt64] = [:]
 
     private init() {
         // DisplayManager publishes on the main actor; delivering synchronously
@@ -35,7 +37,9 @@ public final class DisplayController: ObservableObject {
         manager.$displays
             .sink { [weak self] displays in
                 guard let self else { return }
+                let previous = self.displays
                 self.displays = displays
+                self.displaysDidChange(from: previous, to: displays)
                 for display in displays where !self.modeInFlight.contains(display.id) {
                     if let pending = self.pendingMode[display.id], let current = display.currentMode,
                        current.matches(pending), current.isHiDPI == pending.isHiDPI {
@@ -73,15 +77,73 @@ public final class DisplayController: ObservableObject {
                 self.adjustAllBrightness(by: direction * step)
             }
         }
+
+        // macOS can reload the profile's colour table while a display sleeps,
+        // without the mode-change flag that normally triggers a re-apply.
+        NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.screensDidWakeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                for display in self.displays { self.engine.reapply(display.id) }
+            }
+            .store(in: &cancellables)
     }
 
-    public func start() {
+    /// Keeps per-display state in step with displays coming and going.
+    private func displaysDidChange(from previous: [DisplayInfo], to current: [DisplayInfo]) {
+        let oldIdentities = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0.identity) })
+        let newIdentities = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0.identity) })
+        for display in previous where newIdentities[display.id] != display.identity {
+            let id = display.id
+            displayGenerations[id, default: 0] &+= 1
+            rememberedDimming[display.identity] = engine.currentSoftwareDimming(id)
+            // A display ID can be handed to a different monitor later: values
+            // read from this one must not be shown for the next.
+            brightness.removeValue(forKey: id)
+            contrast.removeValue(forKey: id)
+            volume.removeValue(forKey: id)
+            mute.removeValue(forKey: id)
+            inputSource.removeValue(forKey: id)
+            adjustments.removeValue(forKey: id)
+            dimming.removeValue(forKey: id)
+            loadedDisplays.remove(id)
+            loadedWithDDC.removeValue(forKey: id)
+            pendingMode.removeValue(forKey: id)
+            queuedMode.removeValue(forKey: id)
+            modeInFlight.remove(id)
+            ddcInfo.removeValue(forKey: id)
+            lastUserWrite.removeValue(forKey: id)
+            engine.forgetDisplay(id)
+        }
+        for display in current where oldIdentities[display.id] != display.identity {
+            // Preserve session dimming by monitor identity, but capture a fresh
+            // colour-profile baseline when that monitor returns.
+            if let software = rememberedDimming[display.identity] {
+                engine.applySoftwareDimming(software, display: display.id)
+            }
+        }
+    }
+
+    /// `autoStartVirtualScreens` is off for command line diagnostics, which
+    /// must not connect the user's saved virtual screens as a side effect.
+    public func start(autoStartVirtualScreens: Bool = true) {
         // Displays disconnected earlier in this login session stay disconnected
         // after a relaunch; remember them so they can be reconnected.
         let online = Set(manager.displays.map(\.id))
         manager.disconnected = SettingsStore.shared.state.disconnectedDisplays.filter { !online.contains($0.id) }
         manager.start()
-        VirtualScreenManager.shared.startAutoStartScreens()
+        if autoStartVirtualScreens {
+            VirtualScreenManager.shared.startAutoStartScreens()
+        } else {
+            VirtualScreenManager.shared.automaticConnectionEnabled = false
+        }
+    }
+
+    /// True when a brightness key press would change at least one display.
+    /// The key tap passes the keys on to macOS when it would not.
+    public var hasBrightnessKeyTargets: Bool {
+        keyboardDisplays.contains { !$0.isMirrored }
     }
 
     // MARK: Value loading
@@ -119,7 +181,9 @@ public final class DisplayController: ObservableObject {
             if adjustments[display.id] == nil {
                 let saved = SettingsStore.shared.state.imageAdjustments[display.identity] ?? .neutral
                 adjustments[display.id] = saved
-                if !saved.isNeutral { engine.setImageAdjustments(saved, display: display.id) }
+                // Also when neutral: the engine may still hold the adjustments
+                // of another monitor that used this display ID before.
+                engine.setImageAdjustments(saved, display: display.id)
             }
             loadDDCValues(for: display)
         }
@@ -371,17 +435,7 @@ public final class DisplayController: ObservableObject {
     }
 
     public func setBrightness(_ value: Double, for display: DisplayInfo) {
-        let clamped = max(0, min(1, value))
-        brightness[display.id] = clamped
-        SettingsStore.shared.setBrightness(clamped, for: display.identity)
-
-        if display.hasHardwareBrightness || ddcAvailable(display) {
-            writeHardwareBrightness(Float(clamped), display: display.id)
-            saveConfiguration(for: display)
-        } else {
-            engine.applySoftwareDimming(clamped, display: display.id)
-            dimming[display.id] = clamped
-        }
+        let clamped = setBrightnessWithoutOSD(value, for: display)
         showBrightnessOSD(display: display, value: clamped)
     }
 
@@ -419,7 +473,10 @@ public final class DisplayController: ObservableObject {
         }
     }
 
-    private func setBrightnessWithoutOSD(_ value: Double, for display: DisplayInfo) {
+    /// Applies and saves a brightness level (hardware where the display has
+    /// it, gamma dimming otherwise). Returns the clamped value.
+    @discardableResult
+    private func setBrightnessWithoutOSD(_ value: Double, for display: DisplayInfo) -> Double {
         let clamped = max(0, min(1, value))
         brightness[display.id] = clamped
         SettingsStore.shared.setBrightness(clamped, for: display.identity)
@@ -430,6 +487,7 @@ public final class DisplayController: ObservableObject {
             dimming[display.id] = clamped
         }
         saveConfiguration(for: display)
+        return clamped
     }
 
     public func brightenAll() {
@@ -465,9 +523,13 @@ public final class DisplayController: ObservableObject {
         engine.resetSoftwareDimming(display.id)
         dimming[display.id] = 1.0
         if display.hasHardwareBrightness || ddcAvailable(display) {
-            _ = engine.setHardwareBrightness(1.0, display: display.id)
+            // Off the main thread like every other hardware write: a DDC write
+            // waits for the I2C lock, which a slow capabilities read can hold.
             brightness[display.id] = 1.0
+            SettingsStore.shared.setBrightness(1.0, for: display.identity)
+            writeHardwareBrightness(1.0, display: display.id)
         }
+        saveConfiguration(for: display)
     }
 
     // MARK: Contrast / volume
@@ -645,11 +707,21 @@ public final class DisplayController: ObservableObject {
         guard ddcAvailable(display) else { return }
         inputSource[display.id] = source.value
         let id = display.id
-        DispatchQueue.global(qos: .userInitiated).async { [ddc] in
-            _ = ddc.write(.inputSource, value: source.value, display: id)
+        let name = display.name
+        DispatchQueue.global(qos: .userInitiated).async { [ddc, weak self] in
+            let ok = ddc.write(.inputSource, value: source.value, display: id)
+            DispatchQueue.main.async {
+                if ok {
+                    OSDController.shared.show(symbol: source.symbol, title: "\(name) — \(source.name)", value: 1,
+                                              detail: "Input source switched")
+                } else {
+                    OSDController.shared.show(symbol: "exclamationmark.triangle.fill",
+                                              title: "\(name) did not accept the input switch", value: 1)
+                    // Show the input the monitor is really on again.
+                    if let self, let display = self.display(id) { self.loadDDCValues(for: display, full: false) }
+                }
+            }
         }
-        OSDController.shared.show(symbol: source.symbol, title: "\(display.name) — \(source.name)", value: 1,
-                                  detail: "Input source switched")
     }
 
     // MARK: Rotation, HDR, connection, arrangement
@@ -670,8 +742,11 @@ public final class DisplayController: ObservableObject {
         }
     }
 
-    public func disconnect(_ display: DisplayInfo) {
-        if !manager.disconnect(display.id) { reportError() }
+    @discardableResult
+    public func disconnect(_ display: DisplayInfo) -> Bool {
+        let ok = manager.disconnect(display.id)
+        if !ok { reportError() }
+        return ok
     }
 
     public func reconnect(_ id: CGDirectDisplayID) {
@@ -684,7 +759,7 @@ public final class DisplayController: ObservableObject {
 
     public func place(_ display: DisplayInfo, _ placement: DisplayManager.Placement) {
         if manager.place(display.id, placement) {
-            saveConfiguration(for: display)
+            saveConfiguration(for: current(display))
         } else {
             reportError()
         }
@@ -791,16 +866,26 @@ public final class DisplayController: ObservableObject {
             return
         }
         modeInFlight.insert(id)
+        let generation = displayGenerations[id, default: 0]
         Task { @MainActor in
+            guard displayGenerations[id, default: 0] == generation else { return }
             let fade = SettingsStore.shared.state.general.fadeOnModeChange
                 && SettingsStore.shared.state.general.softwareDimmingEnabled
             if fade { await engine.animateTransition(to: 0, duration: 0.14, display: id) }
+            guard displayGenerations[id, default: 0] == generation else { return }
             let ok = await manager.applyMode(mode.mode, for: id)
+            guard displayGenerations[id, default: 0] == generation else { return }
             if fade {
                 // Let the window server finish swapping the framebuffer (and
                 // macOS restore the profile's table) before fading back in.
                 try? await Task.sleep(nanoseconds: 60_000_000)
+                guard displayGenerations[id, default: 0] == generation else { return }
                 await engine.animateTransition(to: 1, duration: 0.26, display: id)
+                guard displayGenerations[id, default: 0] == generation else { return }
+                // The fade captured the colour table as its baseline. If nothing
+                // else is applied, forget it, so a later colour-profile change is
+                // not overwritten with this copy.
+                engine.invalidateGamma(id)
             }
             engine.reapply(id)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [engine] in engine.reapply(id) }
@@ -830,8 +915,22 @@ public final class DisplayController: ObservableObject {
     }
 
     public func setMain(_ display: DisplayInfo) {
-        _ = manager.setMain(display.id)
-        saveConfiguration(for: display)
+        guard manager.setMain(display.id) else {
+            reportError()
+            return
+        }
+        // Every display's origin moved, and the previous main display lost the flag.
+        // Displays without a saved configuration stay that way.
+        for other in displays where other.id == display.id
+            || SettingsStore.shared.configuration(for: other.identity) != nil {
+            saveConfiguration(for: other)
+        }
+    }
+
+    /// The inventory's up-to-date entry for a display. A `DisplayInfo` passed
+    /// in by a view predates the change that was just applied.
+    private func current(_ display: DisplayInfo) -> DisplayInfo {
+        self.display(display.id) ?? display
     }
 
     public func setMirror(_ display: DisplayInfo, to target: DisplayInfo?) {
@@ -849,9 +948,12 @@ public final class DisplayController: ObservableObject {
     }
 
     public func move(_ display: DisplayInfo, by delta: CGPoint) {
-        _ = manager.move(display.id, to: CGPoint(x: display.bounds.origin.x + delta.x,
-                                                 y: display.bounds.origin.y + delta.y))
-        saveConfiguration(for: display)
+        guard manager.move(display.id, to: CGPoint(x: display.bounds.origin.x + delta.x,
+                                                   y: display.bounds.origin.y + delta.y)) else {
+            reportError()
+            return
+        }
+        saveConfiguration(for: current(display))
     }
 
     public func identify(_ display: DisplayInfo) {
@@ -877,12 +979,13 @@ public final class DisplayController: ObservableObject {
         guard SettingsStore.shared.state.general.restoreConfigurationOnLaunch else { return }
         for display in displays {
             if let configuration = SettingsStore.shared.configuration(for: display.identity) {
-                _ = manager.restore(configuration: configuration)
+                _ = manager.restore(configuration: configuration, to: display.id)
                 if let brightness = configuration.hardwareBrightness, display.hasHardwareBrightness {
                     _ = engine.setHardwareBrightness(brightness, display: display.id)
                 }
                 if let software = configuration.softwareDimming, software < 0.999 {
                     engine.applySoftwareDimming(software, display: display.id)
+                    dimming[display.id] = software
                 }
             }
         }

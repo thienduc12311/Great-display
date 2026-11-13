@@ -133,6 +133,12 @@ public struct VirtualScreenConfiguration: Codable, Identifiable, Equatable {
 
     public var isAssociated: Bool { !associatedDisplayIdentities.isEmpty }
 
+    /// True when an association rule connects and disconnects this screen. A
+    /// manual connect or disconnect would be undone by the rule moments later.
+    public var connectionFollowsAssociation: Bool {
+        isAssociated && (connectWithAssociated || connectWhenAssociatedOffline)
+    }
+
     private enum LegacyKeys: String, CodingKey {
         case associatedDisplayIdentity, streamToAssociated, associatedAction
     }
@@ -387,7 +393,11 @@ public final class SettingsStore: ObservableObject {
     }
 
     public func resetAll() {
-        state = PersistedState()
+        var fresh = PersistedState()
+        // Not a preference: the displays are still disconnected, and this list
+        // is how the app finds them again to reconnect them.
+        fresh.disconnectedDisplays = state.disconnectedDisplays
+        state = fresh
         saveNow()
     }
 }

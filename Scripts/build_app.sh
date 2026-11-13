@@ -117,7 +117,18 @@ else
         --requirements '=designated => identifier "app.greatdisplay.GreatDisplay"' \
         "${APP}" >/dev/null 2>&1 || true
 fi
-codesign --verify --deep --strict "${APP}" >/dev/null 2>&1 && echo "    signature verified" || echo "    signature verification skipped"
+# Local builds carry on without a valid signature (the app still runs, but
+# privacy grants will not stick). REQUIRE_VALID_SIGNATURE=1 makes it an error;
+# the workflows set it so a broken signature cannot be packaged and published.
+if codesign --verify --deep --strict "${APP}" >/dev/null 2>&1; then
+    echo "    signature verified"
+elif [[ "${REQUIRE_VALID_SIGNATURE:-}" == "1" ]]; then
+    echo "error: ${APP} has no valid code signature" >&2
+    codesign --verify --deep --strict --verbose=2 "${APP}" >&2 || true
+    exit 1
+else
+    echo "    warning: signature verification failed" >&2
+fi
 
 echo "==> Built ${APP}"
 echo "    Launch: open \"${APP}\""

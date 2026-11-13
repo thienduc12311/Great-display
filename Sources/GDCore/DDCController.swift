@@ -64,8 +64,19 @@ public final class DDCController {
     private var writeFn: WriteFn?
 
     private var services: [CGDirectDisplayID: UnsafeMutableRawPointer] = [:]
-    private var claimed: Set<UInt> = []
+    /// Registry entry ID of the service each display is bound to. Claims are
+    /// keyed by this ID, which is stable; the service objects themselves are
+    /// created anew on every enumeration and cannot be compared.
+    private var serviceEntries: [CGDirectDisplayID: UInt64] = [:]
+    private var claimed: Set<UInt64> = []
+    /// When a display last failed to match any service, so repeated inventory
+    /// refreshes do not walk the registry again straight away.
+    private var unmatched: [CGDirectDisplayID: Date] = [:]
     private var readFailures: [CGDirectDisplayID: Int] = [:]
+
+    /// Vendor ID this app gives its own virtual screens (see
+    /// `VirtualScreenManager.create`). They have no monitor behind them.
+    private static let virtualVendorID: UInt32 = 0x5678
 
     private let chipAddress: UInt32 = 0x37
     private let dataAddress: UInt32 = 0x51
@@ -76,6 +87,8 @@ public final class DDCController {
     private var unsupported: [CGDirectDisplayID: Set<UInt8>] = [:]
     private var lastTransaction: [CGDirectDisplayID: Date] = [:]
     private var capabilityCache: [CGDirectDisplayID: DDCCapabilities] = [:]
+    /// Transaction-lock protected epochs reject results from unbound services.
+    private var bindingGenerations: [CGDirectDisplayID: UInt64] = [:]
 
     /// DDC is a single shared side channel: transactions and the service cache
     /// are serialized so concurrent callers cannot interleave frames or mutate
@@ -130,8 +143,27 @@ public final class DDCController {
     // MARK: Service discovery
 
     private struct VideoService {
+        let entryID: UInt64
         let portIndex: Int?
         let service: UnsafeMutableRawPointer
+    }
+
+    /// Balances `IOAVServiceCreateWithService`, which returns a retained
+    /// Core Foundation object.
+    private func release(_ service: UnsafeMutableRawPointer) {
+        Unmanaged<AnyObject>.fromOpaque(service).release()
+    }
+
+    /// Unbinds a display from its service. Callers hold `lock`; fragmented
+    /// capabilities reads retain their own reference between transactions.
+    private func dropService(for id: CGDirectDisplayID) {
+        serviceLock.lock()
+        defer { serviceLock.unlock() }
+        bindingGenerations[id, default: 0] &+= 1
+        capabilityCache.removeValue(forKey: id)
+        if let cached = services.removeValue(forKey: id) { release(cached) }
+        if let entry = serviceEntries.removeValue(forKey: id) { claimed.remove(entry) }
+        unmatched.removeValue(forKey: id)
     }
 
     /// Main-thread safe: takes only the service lock, never waits for I/O.
@@ -145,41 +177,65 @@ public final class DDCController {
         serviceLock.lock()
         defer { serviceLock.unlock() }
         if let cached = services[id] { return cached }
-        guard isSupported, CGDisplayIsBuiltin(id) == 0 else { return nil }
+        guard isSupported, Self.canHaveService(id) else { return nil }
+        if let missed = unmatched[id], Date().timeIntervalSince(missed) < 2 { return nil }
+        pruneOfflineBindings()
 
-        let candidates = videoServices()
+        // Only services no other display is bound to.
+        let candidates = videoServices(excluding: claimed)
+        guard let chosen = match(id, among: candidates) else {
+            candidates.forEach { release($0.service) }
+            unmatched[id] = Date()
+            return nil
+        }
+        for candidate in candidates where candidate.entryID != chosen.entryID {
+            release(candidate.service)
+        }
+        claimed.insert(chosen.entryID)
+        serviceEntries[id] = chosen.entryID
+        services[id] = chosen.service
+        unmatched.removeValue(forKey: id)
+        return chosen.service
+    }
+
+    /// Frees the services of displays that went away, so the monitor plugged
+    /// into that port next can claim it. Skipped (and tried again on the next
+    /// miss) while a transaction is running: this is reached from the main
+    /// thread, which must not wait for I/O.
+    private func pruneOfflineBindings() {
+        let stale = services.keys.filter { CGDisplayIsOnline($0) == 0 }
+        guard !stale.isEmpty, lock.try() else { return }
+        defer { lock.unlock() }
+        for id in stale { dropService(for: id) }
+    }
+
+    /// Displays that can sit behind a video service: external, and not one of
+    /// this app's virtual screens (which would otherwise be handed a real
+    /// monitor's service and drive that monitor's brightness and input).
+    private static func canHaveService(_ id: CGDirectDisplayID) -> Bool {
+        CGDisplayIsBuiltin(id) == 0 && CGDisplayVendorNumber(id) != virtualVendorID
+    }
+
+    private func match(_ id: CGDirectDisplayID, among candidates: [VideoService]) -> VideoService? {
         guard !candidates.isEmpty else { return nil }
 
-        // Match the display unit number to the DCP port index. Port indices are
+        // 1. Match the display unit number to the DCP port index. Port indices are
         // zero-based while display unit numbers are one-based. The video-service
         // EDID export is not used: its runtime ABI is not stable across releases.
         let unit = Int(CGDisplayUnitNumber(id))
-        let byUnit = candidates.first {
-            !claimed.contains(UInt(bitPattern: $0.service)) && $0.portIndex == unit - 1
-        } ?? candidates.first {
-            !claimed.contains(UInt(bitPattern: $0.service)) && $0.portIndex == unit
-        }
-        if let byUnit {
-            claimed.insert(UInt(bitPattern: byUnit.service))
-            services[id] = byUnit.service
-            return byUnit.service
+        if let byUnit = candidates.first(where: { $0.portIndex == unit - 1 })
+            ?? candidates.first(where: { $0.portIndex == unit }) {
+            return byUnit
         }
 
         // 2. A single unclaimed service path on the machine.
-        let remaining = candidates.filter { !claimed.contains(UInt(bitPattern: $0.service)) }
-        if remaining.count == 1, let only = remaining.first {
-            claimed.insert(UInt(bitPattern: only.service))
-            services[id] = only.service
-            return only.service
-        }
+        if candidates.count == 1 { return candidates[0] }
 
-        // 3. Deterministic assignment by display order.
-        let externalDisplays = onlineExternalDisplayIDs().sorted()
-        if let index = externalDisplays.firstIndex(of: id), index < remaining.count {
-            let candidate = remaining[index].service
-            claimed.insert(UInt(bitPattern: candidate))
-            services[id] = candidate
-            return candidate
+        // 3. Deterministic assignment by display order, among the displays
+        // that have no service yet.
+        let waiting = onlineExternalDisplayIDs().filter { services[$0] == nil }.sorted()
+        if let index = waiting.firstIndex(of: id), index < candidates.count {
+            return candidates[index]
         }
         return nil
     }
@@ -189,10 +245,13 @@ public final class DDCController {
         guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
         guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
-        return ids.prefix(Int(count)).filter { CGDisplayIsBuiltin($0) == 0 }
+        return ids.prefix(Int(count)).filter(Self.canHaveService)
     }
 
-    private func videoServices() -> [VideoService] {
+    /// Creates a service object for every matching registry entry except the
+    /// `excluded` ones. The caller owns the returned objects and releases those
+    /// it does not keep.
+    private func videoServices(excluding excluded: Set<UInt64> = []) -> [VideoService] {
         guard let createFn else { return [] }
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault,
@@ -212,8 +271,11 @@ public final class DDCController {
                                                             kCFAllocatorDefault,
                                                             0)?.takeRetainedValue()
             if let supported = supported as? Bool, supported == false { continue }
+            var entryID: UInt64 = 0
+            guard IORegistryEntryGetRegistryEntryID(entry, &entryID) == KERN_SUCCESS,
+                  !excluded.contains(entryID) else { continue }
             guard let created = createFn(kCFAllocatorDefault, entry) else { continue }
-            result.append(VideoService(portIndex: dcpPortIndex(of: entry), service: created))
+            result.append(VideoService(entryID: entryID, portIndex: dcpPortIndex(of: entry), service: created))
         }
         return result
     }
@@ -325,10 +387,10 @@ public final class DDCController {
         }
         readFailures[id, default: 0] += 1
         if readFailures[id, default: 0] > 4 {
-            // Re-match the service next time (the port may have changed).
-            serviceLock.lock()
-            if let cached = services.removeValue(forKey: id) { claimed.remove(UInt(bitPattern: cached)) }
-            serviceLock.unlock()
+            // Re-match the service next time (the port may have changed), and
+            // count afresh so one bad spell does not re-match on every read.
+            dropService(for: id)
+            readFailures[id] = 0
         }
         return .noReply
     }
@@ -366,14 +428,15 @@ public final class DDCController {
         for _ in 0..<2 where !ok {
             ok = write([0x84, 0x03, code, high, low, checksum], to: service)
             touch(id)
-            if !ok { usleep(20_000) }
+            if !ok { usleep(50_000) }   // the same gap DDC/CI asks for between transactions
         }
         return ok
     }
 
     public func value(_ vcp: VCP, display id: CGDirectDisplayID) -> Double? {
         guard let reading = read(vcp, display: id), reading.maximum > 0 else { return nil }
-        return Double(reading.current) / Double(reading.maximum)
+        // Some monitors report a current value above their stated maximum.
+        return min(1, Double(reading.current) / Double(reading.maximum))
     }
 
     /// Writes a 0…1 value, scaled to the monitor's maximum (read once, then cached).
@@ -405,7 +468,11 @@ public final class DDCController {
         lock.lock()
         if let cached = capabilityCache[id] { lock.unlock(); return cached }
         guard let service = service(for: id) else { lock.unlock(); return nil }
+        // Invalidation may release the cache's ownership between fragments.
+        _ = Unmanaged<AnyObject>.fromOpaque(service).retain()
+        let generation = bindingGenerations[id, default: 0]
         lock.unlock()
+        defer { release(service) }
         var data: [UInt8] = []
         var offset = 0
         var failures = 0
@@ -415,6 +482,7 @@ public final class DDCController {
             yieldToWriters()
             lock.lock()
             defer { lock.unlock() }
+            guard bindingGenerations[id, default: 0] == generation else { return nil }
             pace(id)
             let hi = UInt8((offset >> 8) & 0xFF), lo = UInt8(offset & 0xFF)
             let checksum: UInt8 = (0x6E ^ 0x51 ^ 0x83 ^ 0xF3 as UInt8) ^ hi ^ lo
@@ -439,11 +507,15 @@ public final class DDCController {
             offset += length
             failures = 0
         }
-        guard !data.isEmpty, let text = String(bytes: data, encoding: .ascii) else { return nil }
+        // Keep printable ASCII only: one stray byte must not discard the string
+        // (it would then be fetched again, ~2 s, on every full reload).
+        let printable = data.filter { (0x20...0x7E).contains($0) }
+        guard !printable.isEmpty, let text = String(bytes: printable, encoding: .ascii) else { return nil }
         let parsed = DDCCapabilities(raw: text)
         lock.lock()
+        defer { lock.unlock() }
+        guard bindingGenerations[id, default: 0] == generation else { return nil }
         capabilityCache[id] = parsed
-        lock.unlock()
         return parsed
     }
 
@@ -461,7 +533,9 @@ public final class DDCController {
         defer { lock.unlock() }
         guard let readFn, let writeFn else { return [] }
         var results: [DDCProbeResult] = []
-        for candidate in videoServices() {
+        let candidates = videoServices()
+        defer { candidates.forEach { release($0.service) } }
+        for candidate in candidates {
             var request: [UInt8] = [0x82, 0x01, 0x10, UInt8((0x82 ^ 0x01 ^ 0x10 ^ 0x6E) & 0xFF)]
             let writeResult = request.withUnsafeMutableBytes { raw -> Int32 in
                 guard let base = raw.baseAddress else { return -1 }
@@ -482,14 +556,12 @@ public final class DDCController {
         return results
     }
 
+    /// Forgets everything cached for a display. Waits for a running
+    /// transaction, so call it off the main thread.
     public func invalidate(display id: CGDirectDisplayID) {
-        serviceLock.lock()
-        if let cached = services.removeValue(forKey: id) {
-            claimed.remove(UInt(bitPattern: cached))
-        }
-        serviceLock.unlock()
         lock.lock()
         defer { lock.unlock() }
+        dropService(for: id)
         readFailures.removeValue(forKey: id)
         maximums.removeValue(forKey: id)
         unsupported.removeValue(forKey: id)

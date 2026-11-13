@@ -376,8 +376,21 @@ struct DeviceSection: View {
                     virtualScreens.destroy(active.id)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { _ = virtualScreens.create(configuration) }
                 }
-                MenuRow(symbol: "eject", title: "Disconnect Virtual Screen") { virtualScreens.destroy(active.id) }
+                // A screen connected by its association rule would come
+                // straight back; the rule is changed in Settings.
+                let saved = settings.state.virtualScreens.first { $0.id == active.id } ?? active.configuration
+                MenuRow(symbol: "eject", title: "Disconnect Virtual Screen",
+                        enabled: !saved.connectionFollowsAssociation) { virtualScreens.destroy(active.id) }
                 MenuRow(symbol: "trash", title: "Discard Virtual Screen") {
+                    // Same question as Settings asks: this removes the saved
+                    // definition and its associations, not just the connection.
+                    let alert = NSAlert()
+                    alert.messageText = "Discard \(saved.name)?"
+                    alert.informativeText = "The virtual screen is disconnected and its configuration is removed."
+                    alert.addButton(withTitle: "Discard")
+                    alert.addButton(withTitle: "Cancel")
+                    NSApp.activate(ignoringOtherApps: true)
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
                     virtualScreens.destroy(active.id)
                     settings.state.virtualScreens.removeAll { $0.id == active.id }
                 }

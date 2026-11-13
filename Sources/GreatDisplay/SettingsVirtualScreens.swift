@@ -210,6 +210,9 @@ struct NewVirtualScreenSheet: View {
             }
             configuration.name = "Virtual \(ratioW):\(ratioH)"
         }
+        // Save what will actually be created (an extreme ratio or a size
+        // over the pixel ceiling is brought within bounds).
+        configuration = VirtualScreenManager.fitted(configuration)
         store.state.virtualScreens.append(configuration)
         _ = VirtualScreenManager.shared.create(configuration)
         SettingsNavigation.shared.selectDevice(.virtualScreen(configuration.id))
@@ -257,8 +260,12 @@ struct VirtualScreenPage: View {
                                          }))
                     .toggleStyle(.switch)
                     .labelsHidden()
+                    // The association rule would undo a manual change at once.
+                    .disabled(configuration.connectionFollowsAssociation)
             }
-            SettingsHelpText(text: "Virtual screens can be connected and disconnected at any time. Size and aspect ratio changes apply while connected; the over-8K option reconnects the screen.")
+            SettingsHelpText(text: configuration.connectionFollowsAssociation
+                ? "This screen connects and disconnects with its associated display. Change that under Associated Displays to connect it by hand."
+                : "Virtual screens can be connected and disconnected at any time. Size and aspect ratio changes apply while connected; the over-8K option reconnects the screen.")
             SettingsRowDivider()
             SettingsRow(title: "Virtual screen name") {
                 TextField("", text: binding(\.name)).frame(width: 240).multilineTextAlignment(.trailing)
@@ -391,6 +398,8 @@ struct VirtualScreenPage: View {
         Color.clear.frame(height: 2)
             .onAppear { syncRatioFields(configuration) }
             .onChange(of: configuration.id) { _, _ in syncRatioFields(configuration) }
+            // Also when an association reshapes the screen underneath.
+            .onChange(of: [configuration.width, configuration.height]) { _, _ in syncRatioFields(configuration) }
             .sheet(isPresented: $showInformation) {
                 if let display { VirtualDisplayInformation(display: display, configuration: configuration) }
             }
@@ -424,9 +433,11 @@ struct VirtualScreenPage: View {
     }
 
     private func apply(_ configuration: VirtualScreenConfiguration) {
-        manager.update(configuration)
-        save(configuration)
-        syncRatioFields(configuration)
+        // `update` saves the configuration; fitting it first keeps the fields
+        // here in step with what was saved.
+        let fitted = VirtualScreenManager.fitted(configuration)
+        manager.update(fitted)
+        syncRatioFields(fitted)
     }
 
     private func syncRatioFields(_ configuration: VirtualScreenConfiguration) {
@@ -445,26 +456,38 @@ struct VirtualScreenPage: View {
     }
 
     private func applyRatio(_ configuration: VirtualScreenConfiguration) {
-        guard let w = Double(ratioWidth), let h = Double(ratioHeight), w > 0, h > 0 else { return }
+        // "inf" and "nan" parse as Double; neither is a ratio.
+        guard let w = Double(ratioWidth), let h = Double(ratioHeight),
+              w.isFinite, h.isFinite, w > 0, h > 0 else {
+            syncRatioFields(configuration)
+            return
+        }
+        // Bounded before any conversion to Int, which traps on values it
+        // cannot represent.
+        let limit = VirtualScreenManager.maximumAspect
+        let ratio = min(max(w / h, 1 / limit), limit)   // width : height
         var copy = configuration
-        let longSide = Double(max(configuration.width, configuration.height))
-        if w >= h {
+        let longSide = Double(max(configuration.width, configuration.height, VirtualScreenManager.minimumSide))
+        if ratio >= 1 {
             copy.width = Int(longSide)
-            copy.height = Int((longSide * h / w / 2).rounded()) * 2
+            copy.height = Int((longSide / ratio / 2).rounded()) * 2
         } else {
             copy.height = Int(longSide)
-            copy.width = Int((longSide * w / h / 2).rounded()) * 2
+            copy.width = Int((longSide * ratio / 2).rounded()) * 2
         }
         apply(copy)
     }
 
     private func scale(_ configuration: VirtualScreenConfiguration, by factor: Double) {
-        var copy = configuration
-        let ratio = Double(configuration.height) / Double(configuration.width)
-        let width = min(Double(VirtualScreenManager.maximumPixels(for: configuration) / (configuration.hiDPI ? 2 : 1)),
-                        max(640, (Double(configuration.width) * factor / 16).rounded() * 16))
+        // A configuration saved by an earlier version can have a zero side;
+        // dividing by it would give an infinite ratio.
+        let current = VirtualScreenManager.fitted(configuration)
+        var copy = current
+        let ratio = Double(current.height) / Double(current.width)
+        let width = max(640, (Double(current.width) * factor / 16).rounded() * 16)
         copy.width = Int(width)
         copy.height = Int((width * ratio / 2).rounded()) * 2
+        // `apply` scales both sides down together at the pixel ceiling.
         apply(copy)
     }
 
@@ -692,6 +715,13 @@ private struct AssociationSettingsSheet: View {
                     draft[keyPath: keyPath] = value
                     // The two auto-connect modes are opposites.
                     if value, let other { draft[keyPath: other] = false }
+                    // An earlier switch (follow orientation, match aspect) may
+                    // have reshaped the screen since this sheet opened: keep
+                    // that geometry instead of writing the old one back.
+                    if let live = SettingsStore.shared.state.virtualScreens.first(where: { $0.id == draft.id }) {
+                        draft.width = live.width
+                        draft.height = live.height
+                    }
                     apply(draft)
                 })
     }

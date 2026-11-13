@@ -98,6 +98,7 @@ jobs:
       - name: Build app
         env:
           ARCHS: arm64 x86_64
+          REQUIRE_VALID_SIGNATURE: "1"
         run: ./Scripts/build_app.sh release
 
       - name: Notarize app

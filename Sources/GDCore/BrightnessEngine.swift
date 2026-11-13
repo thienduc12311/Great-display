@@ -37,6 +37,7 @@ public final class BrightnessEngine {
     }
 
     private var gammaTables: [CGDirectDisplayID: GammaTable] = [:]
+    private var gammaGenerations: [CGDirectDisplayID: UInt64] = [:]
     private let softwareQueue = DispatchQueue(label: "greatdisplay.brightness.software")
 
     private init() {
@@ -84,7 +85,8 @@ public final class BrightnessEngine {
             }
         }
         if let ddc = DDCController.shared.value(.brightness, display: id) {
-            return Float(ddc)
+            // Some monitors report a current value above their maximum.
+            return Float(max(0, min(1, ddc)))
         }
         return nil
     }
@@ -137,7 +139,10 @@ public final class BrightnessEngine {
     public func applySoftwareDimming(_ level: Double, display id: CGDirectDisplayID) {
         let level = max(0, min(1, level))
         softwareQueue.async { [weak self] in
-            guard let self, var table = self.capturedTable(id) else { return }
+            guard let self else { return }
+            // Nothing to undo: do not capture a baseline just to leave it as is.
+            if level >= 0.9995 && self.gammaTables[id] == nil { return }
+            guard var table = self.capturedTable(id) else { return }
             if abs(table.appliedScale - level) < 0.0005 { return }
             table.appliedScale = level
             self.gammaTables[id] = table
@@ -148,7 +153,10 @@ public final class BrightnessEngine {
     /// Applies colour/tone adjustments on top of the software dimming level.
     public func setImageAdjustments(_ adjustments: ImageAdjustments, display id: CGDirectDisplayID) {
         softwareQueue.async { [weak self] in
-            guard let self, var table = self.capturedTable(id) else { return }
+            guard let self else { return }
+            // Nothing to undo: do not capture a baseline just to leave it as is.
+            if adjustments.isNeutral && self.gammaTables[id] == nil { return }
+            guard var table = self.capturedTable(id) else { return }
             if table.adjustments == adjustments { return }
             table.adjustments = adjustments
             self.gammaTables[id] = table
@@ -188,12 +196,21 @@ public final class BrightnessEngine {
         }
     }
 
+    /// Removes a departed monitor's baseline and cancels queued writes. Never
+    /// restore that baseline onto a different monitor that inherits its ID.
+    public func forgetDisplay(_ id: CGDirectDisplayID) {
+        softwareQueue.sync {
+            gammaTables.removeValue(forKey: id)
+            gammaGenerations[id, default: 0] &+= 1
+        }
+    }
+
     /// Forgets the captured table so the next change re-reads it (after a
     /// display reconnects or the colour profile changes).
     public func invalidateGamma(_ id: CGDirectDisplayID) {
         softwareQueue.async { [weak self] in
             guard let self, let table = self.gammaTables[id] else { return }
-            if table.appliedScale >= 0.9995 && table.adjustments.isNeutral {
+            if table.isIdentity {
                 self.gammaTables.removeValue(forKey: id)
             }
         }
@@ -225,9 +242,12 @@ public final class BrightnessEngine {
     /// one display only.
     @MainActor
     public func animateTransition(to target: Double, duration: TimeInterval, display id: CGDirectDisplayID) async {
+        let generation = softwareQueue.sync { gammaGenerations[id, default: 0] }
         let start = softwareQueue.sync { gammaTables[id]?.transition ?? 1 }
+        let duration = duration.isFinite ? max(0, min(10, duration)) : 0
         let frames = max(1, Int(duration * 60))
         for frame in 1...frames {
+            guard softwareQueue.sync(execute: { gammaGenerations[id, default: 0] == generation }) else { return }
             let t = Double(frame) / Double(frames)
             let eased = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2
             setTransition(start + (target - start) * eased, display: id)
@@ -243,8 +263,11 @@ public final class BrightnessEngine {
     }
 
     private func schedulePush(_ table: GammaTable, display id: CGDirectDisplayID) {
+        let generation = gammaGenerations[id, default: 0]
         DispatchQueue.main.async { [weak self] in
-            self?.pushGamma(table, display: id)
+            guard let self,
+                  self.softwareQueue.sync(execute: { self.gammaGenerations[id, default: 0] == generation }) else { return }
+            self.pushGamma(table, display: id)
         }
     }
 

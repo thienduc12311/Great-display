@@ -139,9 +139,9 @@ greatdisplay --probe            # display inventory as JSON
 ```
 GreatDisplay --probe
 GreatDisplay --set-brightness <displayID> <0..1>
-GreatDisplay --set-resolution <displayID> <width> <height> [hidpi]
+GreatDisplay --set-resolution <displayID> <width> <height> [hidpi|lodpi] [hz]
 GreatDisplay --toggle-hidpi <displayID>
-GreatDisplay --create-virtual <width> <height>
+GreatDisplay --create-virtual <width> <height> [holdSeconds]
 GreatDisplay --ddc-read <displayID>
 GreatDisplay --ddc-write <displayID> <vcpHex> <rawValue>
 GreatDisplay --ddc-diag <displayID>
@@ -157,7 +157,16 @@ GreatDisplay --reconnect <displayID>
 GreatDisplay --system-colors [dark|nightshift|truetone on|off]
 GreatDisplay --adjust <displayID> gamma=1.2 temperature=0.3 red=1 green=1 blue=0.9 [holdSeconds]
 GreatDisplay --self-test
+GreatDisplay --help
 ```
+
+Commands exit with 0 on success and a non-zero status otherwise.
+Quit the GUI before using `--disconnect` or `--reconnect`; these commands exit
+with status 4 if another instance is running, to avoid conflicting settings
+writes. Keep the GUI closed until the command finishes.
+`--create-virtual` keeps the screen for `holdSeconds` (2 by default) and then
+removes it. `--set-brightness` sets hardware brightness (native or DDC/CI);
+software dimming only lasts while the app runs, so it is not offered here.
 
 `--probe` is the quickest way to confirm the app sees the same displays as the
 system, and `--ddc-diag` prints the raw reply frames from each video service.
@@ -173,6 +182,7 @@ It reads these environment variables:
 | `BUILD_NUMBER` | commit count | `CFBundleVersion` |
 | `ARCHS` | host architecture | `"arm64 x86_64"` builds a universal binary |
 | `SIGN_IDENTITY` | first valid identity, else ad-hoc | Code signing identity; `-` forces ad-hoc |
+| `REQUIRE_VALID_SIGNATURE` | unset | `1` fails the build when the bundle's signature does not verify |
 
 ```sh
 VERSION=1.2.0 ARCHS="arm64 x86_64" ./Scripts/build_app.sh
