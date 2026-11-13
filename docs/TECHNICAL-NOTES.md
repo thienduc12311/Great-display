@@ -62,7 +62,7 @@ silently drop a 120 Hz panel to 60 Hz.
 Mode changes from the menu run the display-configuration transaction on a
 background queue, so the menu keeps animating. The menu shows the requested mode
 at once, and rapid slider moves collapse to the last one. Only the affected
-display fades out and back in through its own colour table (Settings > Menu can
+display fades out and back in through its own colour table (Settings > Menu Bar can
 turn this off). Software dimming and image adjustments are re-applied after any
 mode change, including changes made in System Settings, because macOS resets the
 colour table. `CGConfigureDisplayFadeEffect` is not used: with any explicit fade
@@ -94,7 +94,7 @@ The event tap runs on its own thread. On the main thread, any stall (display
 reconfiguration, a slow DDC monitor) made macOS disable the tap for timing out.
 Each display steps from its own brightness level. If MonitorControl or Lunar
 is running, whichever app's tap sits first takes the
-keys, so Settings > Keyboard and the menu show a conflict notice.
+keys, so Settings > Keyboard & OSD and the menu show a conflict notice.
 `open greatdisplay://key-test` posts one brightness-down/up pair through the
 real event path, and `log show --predicate 'subsystem == "app.greatdisplay"'`
 shows what the tap received.
@@ -108,7 +108,7 @@ showing the app as enabled, but the grant no longer applies. `build_app.sh`
 signs with `SIGN_IDENTITY` (or the first valid signing identity), or else
 ad-hoc with `designated => identifier "app.greatdisplay.GreatDisplay"`, so a
 grant survives rebuilds. The app watches trust live and starts the
-brightness-key tap as soon as access is granted. Settings > Keyboard has
+brightness-key tap as soon as access is granted. Settings > Keyboard & OSD has
 **Reset Permission** for a stale entry.
 
 ## Mirroring a virtual screen

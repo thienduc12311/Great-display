@@ -260,7 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Development aid: renders the menu (optionally expanded) into a PNG.
     /// Options: `more` opens more options on the first display, `feature=<name>`
-    /// opens a feature panel there, `tools` shows Tools, `settings=<pane>` renders Settings.
+    /// opens a feature panel there, `tools` shows Tools, `settings=<pane>` renders Settings (`tab=<picture|color|monitor|options>` picks the display tab).
     private func renderMenuSnapshot(to path: String, options: [String]) {
         // Capabilities take ~2 s to read; wait for them.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
@@ -302,6 +302,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "menu": SettingsNavigation.shared.selection = .menu
                 case "virtual": SettingsNavigation.shared.selection = .virtualScreens
                 default: SettingsNavigation.shared.selection = .displays
+                }
+                if let tab = options.first(where: { $0.hasPrefix("tab=") }).flatMap({ DisplayTab(rawValue: String($0.dropFirst(4))) }) {
+                    SettingsNavigation.shared.displayTab = tab
                 }
                 let hosting: NSView
                 if options.contains("vpage"), case .virtualScreen(let id) = SettingsNavigation.shared.selection {

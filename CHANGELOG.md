@@ -15,6 +15,19 @@ change under **Unreleased** in the same pull request.
   interactive demo of the menu, a short product film and release notes built
   from this changelog, published to GitHub Pages by the Website workflow.
 
+### Changed
+
+- **Redesigned Settings window.** The sidebar now lists every display and
+  virtual screen directly, with a live thumbnail, current mode and a Main
+  badge, plus a search field that jumps straight to any setting. All Displays
+  shows a clickable map of the desktop arrangement, quick brightness sliders
+  and notices for anything that needs attention. Each display page is split
+  into Picture, Color, Monitor and Options tabs, with "Looks like" resolution
+  tiles and one-click color presets (Cool, Warm, Evening, Reading). Menu Bar
+  settings show a live preview of the menu, Keyboard & OSD has step-size
+  presets and an OSD preview, and explanations can move behind ⓘ buttons
+  (General › Show explanations).
+
 ## [1.0.0] - 2026-11-12
 
 First public release.

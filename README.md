@@ -113,7 +113,7 @@ See [Building](#building) for options.
 | Stream a display | Full-screen stream onto another display or onto itself (self-stream with video filters); per-source options for pointer, 1:1 pixel mapping, integer scaling, free aspect ratio, cropping, flip, rotation, alignment, zoom, underscan, alpha and target FPS, applied live; resume on connect; interactive mode ("Use Like a Normal Screen") moves the pointer onto the source display when it enters the stream, so clicks, typing, scrolling and the source's menu bar work through the stream |
 | Persistence | Settings and per-display configuration stored by display identity |
 | Login item | Optional launch at login through `SMAppService` |
-| Settings window | Sidebar with Displays overview, a page per display, Virtual Screens, Application, Menu, Keyboard and About |
+| Settings window | Searchable sidebar listing every display and virtual screen; a visual arrangement overview with quick brightness controls; per-display Picture, Color, Monitor and Options tabs; General, Menu Bar (with live preview), Keyboard & OSD and About |
 | Menu bar icon | Click opens the menu, Option-click opens Settings, right-click opens a quick menu |
 | Deep links | `greatdisplay://settings`, `greatdisplay://display/<id>`, `greatdisplay://brighten` |
 
