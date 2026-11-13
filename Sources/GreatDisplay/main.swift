@@ -159,10 +159,15 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             return 2
         }
         let results = DDCController.shared.probeAll(display: id)
-        print("unit=\(CGDisplayUnitNumber(id)) services=\(results.count)")
+        print(String(format: "unit=%u vendor=%04X model=%04X serial=%u services=%d",
+                     CGDisplayUnitNumber(id), CGDisplayVendorNumber(id), CGDisplayModelNumber(id),
+                     CGDisplaySerialNumber(id), results.count))
         for result in results {
             let hex = result.bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-            print("port=\(result.portIndex.map(String.init) ?? "?") write=\(result.writeResult) read=\(result.readResult) bytes=[\(hex)]")
+            let monitor = result.monitor.map {
+                String(format: "%04X/%04X/%u %@", $0.vendor, $0.product, $0.serial, $0.name ?? "?")
+            } ?? "none"
+            print("port=\(result.portIndex.map(String.init) ?? "?") monitor=[\(monitor)] write=\(result.writeResult) read=\(result.readResult) bytes=[\(hex)]")
         }
         return 0
 

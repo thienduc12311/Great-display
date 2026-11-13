@@ -43,6 +43,12 @@ change under **Unreleased** in the same pull request.
 - `--create-virtual` rejects non-finite or malformed hold durations before
   creating a display. Connection CLI commands refuse to run alongside the GUI
   to avoid overwriting each other's saved disconnect state.
+- With two external monitors, brightness and other DDC controls could drive
+  the other monitor, and the one shown got no reply. Each display's DDC channel
+  was chosen by its unit number, which does not always follow the port order.
+  It is now chosen by the monitor's EDID vendor, product and serial, which the
+  port's framebuffer reports; the unit number only decides between ports that
+  report no monitor. `--ddc-diag` shows the monitor found on each port.
 - A stream that the system ended (sleep, the stop-sharing control) left its
   window over the display showing the last frame; the stream is now removed.
 - Esc did not stop a stream, because the stream window could not receive key
