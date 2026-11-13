@@ -9,6 +9,12 @@ change under **Unreleased** in the same pull request.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-12
+
+A reliability release. DDC controls now reach the right monitor when two are
+connected, streams, mirroring and saved configurations behave across sleep,
+reconnects and port changes, and the command line reports real results.
+
 ### Changed
 
 - The development test links (`greatdisplay://stream-self-test`,
@@ -162,6 +168,7 @@ First public release.
 - Universal (Apple Silicon and Intel) DMG and ZIP builds published by GitHub
   Actions.
 
-[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/thienduc12311/Great-display/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/thienduc12311/Great-display/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thienduc12311/Great-display/releases/tag/v1.0.0
