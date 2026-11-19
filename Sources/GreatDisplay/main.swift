@@ -128,9 +128,24 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             switch DDCController.shared.reading(code: code, display: id) {
             case let .value(current, maximum): print("\(label) \(current)/\(maximum)")
             case .unsupported: print("\(label) unsupported")
+            case .refused: print("\(label) refused over the video cable")
             case .noReply: print("\(label) no reply")
             }
         }
+        return 0
+
+    case "--usb-probe":
+        guard arguments.count >= 4, let id = UInt32(arguments[2]),
+              let code = parseHexByte(arguments[3]) else {
+            printError("usage: --usb-probe <displayID> <vcpHex>\n")
+            return 2
+        }
+        _ = DDCController.shared.reading(code: code, display: id)
+        guard let bytes = DDCController.shared.usbProbe(code: code, display: id) else {
+            print("no USB bridge for display \(id)")
+            return 4
+        }
+        print(bytes.map { String(format: "%02X", $0) }.joined(separator: " "))
         return 0
 
     case "--ddc-caps":
@@ -167,7 +182,11 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             let monitor = result.monitor.map {
                 String(format: "%04X/%04X/%u %@", $0.vendor, $0.product, $0.serial, $0.name ?? "?")
             } ?? "none"
-            print("port=\(result.portIndex.map(String.init) ?? "?") monitor=[\(monitor)] write=\(result.writeResult) read=\(result.readResult) bytes=[\(hex)]")
+            print("port=\(result.portIndex.map(String.init) ?? "?") monitor=[\(monitor)] refused=\(result.refused) write=\(result.writeResult) read=\(result.readResult) bytes=[\(hex)]")
+            if result.refused, let name = result.monitor?.name,
+               let usb = DDCController.shared.usbDescription(displayName: name) {
+                print("usb=\(usb)")
+            }
         }
         return 0
 
@@ -730,7 +749,7 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
 
 let applicationArguments = CommandLine.arguments
 let commands: Set<String> = ["--probe", "--set-brightness", "--set-resolution", "--toggle-hidpi",
-                             "--create-virtual", "--ddc-read", "--ddc-write", "--ddc-diag", "--ddc-caps", "--mirror",
+                             "--create-virtual", "--ddc-read", "--ddc-write", "--ddc-diag", "--ddc-caps", "--usb-probe", "--mirror",
                              "--rotate", "--hdr", "--disconnect", "--reconnect", "--system-colors", "--adjust", "--self-test", "--audio-output", "--ddc-burst",
                              "--mirror-demo", "--stream-check", "--stream-test"]
 /// Flags handled by the app itself after launch (development aids).

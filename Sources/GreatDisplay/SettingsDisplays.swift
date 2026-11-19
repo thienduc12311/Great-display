@@ -847,9 +847,12 @@ private struct DeviceControlCard: View {
         if controller.ddcAvailable(display) {
             available
         } else if display.hasDDC && controller.ddcInfo[display.id]?.responsive == false {
+            let refused = controller.ddcInfo[display.id]?.refused == true
             Callout(symbol: "exclamationmark.triangle.fill", tint: .orange,
-                    title: "The monitor is not responding to DDC/CI",
-                    message: "Brightness falls back to software dimming. Enable DDC/CI in the monitor's on-screen menu, or connect it directly instead of through a dock or adapter.") {
+                    title: refused ? "The monitor refuses DDC/CI on this cable" : "The monitor is not responding to DDC/CI",
+                    message: refused
+                        ? "Check OSD › DDC/CI, update its firmware, or install Dell Display and Peripheral Manager. Brightness falls back to software dimming."
+                        : "Brightness falls back to software dimming. Enable DDC/CI in the monitor's on-screen menu, or connect it directly instead of through a dock or adapter.") {
                 Button("Try Again") {
                     let id = display.id
                     // Invalidation can wait on a slow DDC transaction.
@@ -873,11 +876,19 @@ private struct DeviceControlCard: View {
     private var available: some View {
         let info = controller.ddcInfo[display.id]
         let caps = info?.capabilities
+        let usb = controller.usesUSBTransport(display)
         SettingsCard {
-            SettingsIconHeader(symbol: "cable.connector", title: "Connected over DDC/CI", tint: .green,
-                               subtitle: caps.map { "\($0.model ?? "Monitor") · MCCS \($0.mccsVersion ?? "?") · \($0.codes.count) controls" }
-                                   ?? "Responding · reading capabilities…") {
+            SettingsIconHeader(symbol: "cable.connector", title: usb ? "Connected over USB" : "Connected over DDC/CI", tint: .green,
+                               subtitle: (caps.map { "\($0.model ?? "Monitor") · MCCS \($0.mccsVersion ?? "?") · \($0.codes.count) controls" }
+                                   ?? "Responding · reading capabilities…") + (usb ? " · USB bridge" : "")) {
                 Button("Advanced…") { showAdvanced = true }
+            }
+        }
+        if usb {
+            Callout(symbol: "info.circle.fill", tint: .blue,
+                    title: "DDC/CI is refused on the video cable",
+                    message: "Brightness, input switching and the other controls use this monitor's USB connection instead.") {
+                EmptyView()
             }
         }
 
@@ -1187,6 +1198,7 @@ private struct DDCAdvancedSheet: View {
                 switch reading {
                 case let .value(current, maximum): rawResult = "\(current) / \(maximum)"; rawValue = "\(current)"
                 case .unsupported: rawResult = "unsupported"
+                case .refused: rawResult = "refused over the cable"
                 case .noReply: rawResult = "no reply"
                 }
             }
@@ -1230,6 +1242,8 @@ private struct DDCAdvancedSheet: View {
                     lines.append(String(format: "0x%02X  %@ %d / %d", vcp.rawValue, name, current, maximum))
                 case .unsupported:
                     lines.append(String(format: "0x%02X  %@ unsupported", vcp.rawValue, name))
+                case .refused:
+                    lines.append(String(format: "0x%02X  %@ refused over the cable", vcp.rawValue, name))
                 case .noReply:
                     lines.append(String(format: "0x%02X  %@ no reply", vcp.rawValue, name))
                 }

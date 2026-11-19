@@ -56,6 +56,7 @@ public final class DDCController {
     public enum Reading: Equatable {
         case value(current: Int, maximum: Int)
         case unsupported
+        case refused
         case noReply
     }
 
@@ -77,6 +78,16 @@ public final class DDCController {
     /// refreshes do not walk the registry again straight away.
     private var unmatched: [CGDirectDisplayID: Date] = [:]
     private var readFailures: [CGDirectDisplayID: Int] = [:]
+    /// The monitor name reported by the video service, used to find the same
+    /// monitor's USB HID bridge when the video link refuses DDC/CI.
+    private var serviceNames: [CGDirectDisplayID: String] = [:]
+    /// Displays whose DDC/CI traffic goes through the monitor's USB connection.
+    private var usbMonitors: [CGDirectDisplayID: DellUSBTransport.Monitor] = [:]
+    /// Displays driven through Dell's in-process monitor SDK.
+    private var sdkMonitors: [CGDirectDisplayID: DellMonitorSDKBridge.Monitor] = [:]
+    /// The monitor returns the DDC/CI Null Message on the video cable. Stop
+    /// probing it for a while; the USB path is used instead when available.
+    private var refusedUntil: [CGDirectDisplayID: Date] = [:]
 
     /// Vendor ID this app gives its own virtual screens (see
     /// `VirtualScreenManager.create`). They have no monitor behind them.
@@ -183,6 +194,10 @@ public final class DDCController {
         if let cached = services.removeValue(forKey: id) { release(cached) }
         if let entry = serviceEntries.removeValue(forKey: id) { claimed.remove(entry) }
         unmatched.removeValue(forKey: id)
+        serviceNames.removeValue(forKey: id)
+        usbMonitors.removeValue(forKey: id)
+        sdkMonitors.removeValue(forKey: id)
+        refusedUntil.removeValue(forKey: id)
     }
 
     /// Main-thread safe: takes only the service lock, never waits for I/O.
@@ -213,6 +228,7 @@ public final class DDCController {
         claimed.insert(chosen.entryID)
         serviceEntries[id] = chosen.entryID
         services[id] = chosen.service
+        serviceNames[id] = chosen.monitor?.name
         unmatched.removeValue(forKey: id)
         return chosen.service
     }
@@ -450,8 +466,19 @@ public final class DDCController {
         if yieldToWrites { yieldToWriters() }
         lock.lock()
         defer { lock.unlock() }
-        guard let service = service(for: id) else { return .noReply }
+        guard let service = service(for: id) else {
+            if let usb = usbReading(code: code, display: id) { return usb }
+            return .noReply
+        }
+        if usesUSB(display: id), let usb = usbReading(code: code, display: id) { return usb }
         if unsupported[id]?.contains(code) == true { return .unsupported }
+        if refusedUntil[id] != nil {
+            if let usb = usbReading(code: code, display: id) {
+                refusedUntil.removeValue(forKey: id)
+                return usb
+            }
+            return .refused
+        }
         for _ in 0..<3 {
             pace(id)
             let checksum = UInt8((0x82 ^ 0x01 ^ Int(code) ^ 0x6E) & 0xFF)
@@ -462,6 +489,15 @@ public final class DDCController {
             let response = read(length: 12, from: service)
             touch(id)
             guard let response else { continue }
+            if DellUSBTransport.isNullMessage(response) {
+                if let usb = usbReading(code: code, display: id) {
+                    refusedUntil.removeValue(forKey: id)
+                    return usb
+                }
+                refusedUntil[id] = Date().addingTimeInterval(30)
+                readFailures[id] = 0
+                return .refused
+            }
             for base in 0...max(0, response.count - 10) where base + 9 < response.count {
                 guard response[base] == 0x6E, response[base + 1] & 0x80 != 0,
                       response[base + 2] == 0x02, response[base + 4] == code else { continue }
@@ -492,6 +528,103 @@ public final class DDCController {
         return .noReply
     }
 
+    /// Sends a read to the monitor's USB HID bridge when its video link refuses
+    /// DDC/CI. The caller holds `lock`; `serviceLock` is only taken around the
+    /// cache, never while a report is on the wire.
+    private func usbReading(code: UInt8, display id: CGDirectDisplayID) -> Reading? {
+        if let monitor = sdkMonitor(for: id) {
+            switch DellMonitorSDKBridge.shared.read(code: code, monitor: monitor) {
+            case let .value(current, maximum):
+                readFailures[id] = 0
+                if maximum > 0 { maximums[id, default: [:]][code] = maximum }
+                return .value(current: current, maximum: maximum)
+            case .unsupported:
+                unsupported[id, default: []].insert(code)
+                readFailures[id] = 0
+                return .unsupported
+            case .refused, .noReply:
+                serviceLock.lock()
+                sdkMonitors.removeValue(forKey: id)
+                serviceLock.unlock()
+            }
+        }
+        guard let monitor = usbMonitor(for: id) else { return nil }
+        switch DellUSBTransport.shared.reading(code: code, monitor: monitor) {
+        case let .value(current, maximum):
+            readFailures[id] = 0
+            if maximum > 0 { maximums[id, default: [:]][code] = maximum }
+            return .value(current: current, maximum: maximum)
+        case .unsupported:
+            unsupported[id, default: []].insert(code)
+            readFailures[id] = 0
+            return .unsupported
+        case .noReply:
+            serviceLock.lock()
+            usbMonitors.removeValue(forKey: id)
+            serviceLock.unlock()
+            return nil
+        }
+    }
+
+    private func sdkMonitor(for id: CGDirectDisplayID) -> DellMonitorSDKBridge.Monitor? {
+        serviceLock.lock()
+        if let monitor = sdkMonitors[id] {
+            serviceLock.unlock()
+            return monitor
+        }
+        let name = serviceNames[id]
+        serviceLock.unlock()
+        guard let name, let monitor = DellMonitorSDKBridge.shared.monitor(named: name) else { return nil }
+        serviceLock.lock()
+        if serviceNames[id] == name { sdkMonitors[id] = monitor }
+        serviceLock.unlock()
+        return monitor
+    }
+
+    private func usbMonitor(for id: CGDirectDisplayID) -> DellUSBTransport.Monitor? {
+        serviceLock.lock()
+        if let monitor = usbMonitors[id] {
+            serviceLock.unlock()
+            return monitor
+        }
+        let name = serviceNames[id]
+        serviceLock.unlock()
+        guard let name, let monitor = DellUSBTransport.shared.monitor(named: name) else { return nil }
+        serviceLock.lock()
+        if serviceNames[id] == name { usbMonitors[id] = monitor }
+        serviceLock.unlock()
+        return monitor
+    }
+
+    /// True when this display's DDC/CI currently goes through its USB HID
+    /// bridge because the video cable returns the DDC/CI Null Message.
+    public func usesUSB(display id: CGDirectDisplayID) -> Bool {
+        serviceLock.lock()
+        defer { serviceLock.unlock() }
+        return usbMonitors[id] != nil || sdkMonitors[id] != nil
+    }
+
+    /// Diagnostic description of the USB bridge matching an EDID product
+    /// name, without opening a display or starting a session.
+    public func usbDescription(displayName: String) -> String? {
+        if let monitor = DellMonitorSDKBridge.shared.monitor(named: displayName) {
+            return "\(monitor.name) index=\(monitor.index)"
+        }
+        guard let monitor = DellUSBTransport.shared.monitor(named: displayName) else { return nil }
+        return "\(monitor.name) registry=\(monitor.registryID)"
+    }
+
+    /// Raw reply from the USB bridge, for `--ddc-diag`.
+    public func usbProbe(code: UInt8, display id: CGDirectDisplayID) -> [UInt8]? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let monitor = sdkMonitor(for: id) {
+            return DellMonitorSDKBridge.shared.rawCommand(code: code, monitor: monitor)
+        }
+        guard let monitor = usbMonitor(for: id) else { return nil }
+        return DellUSBTransport.shared.rawResponse(code: code, monitor: monitor)
+    }
+
     public func read(_ vcp: VCP, display id: CGDirectDisplayID) -> (current: Int, maximum: Int)? {
         read(code: vcp.rawValue, display: id)
     }
@@ -514,6 +647,37 @@ public final class DDCController {
         defer { writerExit() }
         lock.lock()
         defer { lock.unlock() }
+        serviceLock.lock()
+        var sdk = sdkMonitors[id]
+        var usb = usbMonitors[id]
+        serviceLock.unlock()
+        if sdk == nil, usb == nil {
+            // A raw write can arrive before any read has discovered which
+            // transport the monitor answers on.
+            _ = reading(code: VCP.brightness.rawValue, display: id, yieldToWrites: false)
+            serviceLock.lock()
+            sdk = sdkMonitors[id]
+            usb = usbMonitors[id]
+            serviceLock.unlock()
+            if sdk == nil, usb == nil, refusedUntil[id] != nil { return false }
+        }
+        let hadSDK = sdk != nil
+        if let sdk {
+            if DellMonitorSDKBridge.shared.write(code: code, value: value, monitor: sdk) { return true }
+            serviceLock.lock()
+            sdkMonitors.removeValue(forKey: id)
+            serviceLock.unlock()
+        }
+        if let usb {
+            let ok = DellUSBTransport.shared.write(code: code, value: value, monitor: usb)
+            if !ok {
+                serviceLock.lock()
+                usbMonitors.removeValue(forKey: id)
+                serviceLock.unlock()
+            }
+            return ok
+        }
+        if hadSDK { return false }
         guard let service = service(for: id) else { return false }
         let clamped = max(0, min(0xFFFF, value))
         let high = UInt8((clamped >> 8) & 0xFF)
@@ -564,6 +728,43 @@ public final class DDCController {
     public func capabilities(display id: CGDirectDisplayID) -> DDCCapabilities? {
         lock.lock()
         if let cached = capabilityCache[id] { lock.unlock(); return cached }
+        if sdkMonitors[id] == nil, usbMonitors[id] == nil, refusedUntil[id] == nil {
+            // Find out which transport this monitor answers on. Capabilities
+            // themselves are both the first read and the fallback probe.
+            _ = reading(code: VCP.brightness.rawValue, display: id, yieldToWrites: false)
+        }
+        serviceLock.lock()
+        var sdk = sdkMonitors[id]
+        var usb = usbMonitors[id]
+        serviceLock.unlock()
+        if sdk == nil, refusedUntil[id] != nil {
+            sdk = sdkMonitor(for: id)
+        }
+        if let sdk {
+            let generation = bindingGenerations[id, default: 0]
+            lock.unlock()
+            let caps = DellMonitorSDKBridge.shared.capabilities(monitor: sdk)
+            lock.lock()
+            if let caps, generation == bindingGenerations[id, default: 0] {
+                capabilityCache[id] = caps
+            }
+            lock.unlock()
+            return caps
+        }
+        if usb == nil, refusedUntil[id] != nil {
+            usb = usbMonitor(for: id)
+        }
+        if let usb {
+            let generation = bindingGenerations[id, default: 0]
+            lock.unlock()
+            let caps = DellUSBTransport.shared.capabilities(monitor: usb)
+            lock.lock()
+            if let caps, generation == bindingGenerations[id, default: 0] {
+                capabilityCache[id] = caps
+            }
+            lock.unlock()
+            return caps
+        }
         guard let service = service(for: id) else { lock.unlock(); return nil }
         // Invalidation may release the cache's ownership between fragments.
         _ = Unmanaged<AnyObject>.fromOpaque(service).retain()
@@ -623,6 +824,9 @@ public final class DDCController {
         public let writeResult: Int32
         public let readResult: Int32
         public let bytes: [UInt8]
+
+        /// The port returned the DDC/CI Null Message instead of a reply.
+        public var refused: Bool { DellUSBTransport.isNullMessage(bytes) }
     }
 
     /// Transport-level diagnostic used by the command line probe.
@@ -665,6 +869,8 @@ public final class DDCController {
         maximums.removeValue(forKey: id)
         unsupported.removeValue(forKey: id)
         capabilityCache.removeValue(forKey: id)
+        DellUSBTransport.shared.invalidate()
+        DellMonitorSDKBridge.shared.invalidate()
     }
 }
 

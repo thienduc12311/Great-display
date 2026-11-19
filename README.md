@@ -67,6 +67,23 @@ download (`shasum -a 256 -c SHA256SUMS.txt`).
 Everything else, including DDC/CI, mirroring and virtual screens, works without
 extra permissions. macOS asks the first time a feature needs one.
 
+### Monitors that refuse DDC/CI
+
+Some monitors, the Dell U2723QE among them, answer every DDC/CI request on the
+video cable with the Null Message: the monitor is refusing the protocol on that
+connection rather than failing to answer. Great Display detects this and sends
+the same requests over the monitor's USB upstream connection instead, so
+brightness, contrast, input switching and the capabilities string keep working.
+
+Connect the monitor's USB cable to the Mac for this to work. Monitors that use
+Dell's control-transfer protocol also need **Dell Display and Peripheral
+Manager (DDPM)** installed, because Great Display loads the monitor SDK that
+DDPM ships at `/Applications/DDPM/DDPM.app`. DDPM itself does not have to be
+running, and Great Display never launches it or its command-line tool. Without
+that SDK those monitors fall back to software dimming. Monitors that expose a
+Realtek vendor HID bridge, and monitors that answer DDC/CI on the video cable
+normally, need neither the SDK nor DDPM.
+
 ### Build from source
 
 You need a recent Xcode with the macOS SDK (the project is developed with
@@ -146,6 +163,7 @@ GreatDisplay --ddc-read <displayID>
 GreatDisplay --ddc-write <displayID> <vcpHex> <rawValue>
 GreatDisplay --ddc-diag <displayID>
 GreatDisplay --ddc-caps <displayID>
+GreatDisplay --usb-probe <displayID> <vcpHex>
 GreatDisplay --mirror <sourceID> <targetID|off>
 GreatDisplay --mirror-demo <targetID> [seconds]
 GreatDisplay --stream-check
@@ -239,8 +257,9 @@ hardware are in [docs/TECHNICAL-NOTES.md](docs/TECHNICAL-NOTES.md).
   change between macOS releases. The app degrades to software dimming rather
   than failing when a path is unavailable.
 - Software dimming scales the gamma table and can clip HDR content.
-- Some monitors, docks and hubs do not tunnel DDC/CI. The U2723QE in the test
-  setup reported "unsupported" on its video service while the S2725QC worked.
+- Some monitors, docks and hubs do not tunnel DDC/CI. A monitor that refuses
+  DDC/CI on the video cable is driven over its USB connection instead, where
+  the app can reach one; see "Monitors that refuse DDC/CI" above.
 - Screen streaming requires Screen Recording permission (granted once; the
   build keeps a stable signing requirement so it survives rebuilds).
 - EDID override writing, HDR/XDR brightness upscaling, picture-in-picture and
