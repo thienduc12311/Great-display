@@ -9,6 +9,41 @@ change under **Unreleased** in the same pull request.
 
 ## [Unreleased]
 
+### Added
+
+- Monitors that refuse DDC/CI on the video cable are now driven over their USB
+  upstream connection. Brightness, contrast, input source and the capabilities
+  string all take the same path, so the controls behave the same as on a
+  monitor that answers over the cable. Two bridges are supported: Realtek
+  vendor HID reports, and Dell's control-transfer protocol through the monitor
+  SDK that Dell Display and Peripheral Manager installs.
+
+  **Dell Display and Peripheral Manager (DDPM) is required for the monitors
+  that use Dell's control-transfer protocol**, including the Dell U2723QE.
+  Great Display loads the SDK that DDPM ships at `/Applications/DDPM/DDPM.app`;
+  DDPM does not have to be running, and Great Display never launches it or its
+  command-line tool. Without DDPM installed, those monitors fall back to
+  software dimming. The monitor's USB cable has to be connected to the Mac
+  either way. Monitors with a Realtek HID bridge, and monitors that answer
+  DDC/CI on the video cable normally, need neither.
+- Settings and the display menu say when a monitor is being controlled over
+  USB, and a monitor that refuses DDC/CI with no usable bridge now points at
+  the monitor's OSD › DDC/CI setting and at DDPM instead of only reporting that
+  it is unresponsive.
+- `--usb-probe <displayID> <vcpHex>` prints the raw USB reply for a VCP code.
+
+### Fixed
+
+- A Dell monitor that returns the DDC/CI Null Message (`6E 80 BE`) on its video
+  cable no longer falls back to software brightness and an unknown input. The
+  Null Message is recognised as a refusal rather than a broken reply, and it is
+  cached so background refreshes do not keep probing a monitor that has already
+  said no. Brightness, contrast, input source and capabilities work on a Dell
+  U2723QE, while monitors that answer over the video cable keep using the
+  native path.
+- `--ddc-diag` reports whether each port returned the Null Message and names
+  the matching USB bridge.
+
 ## [1.1.1] - 2026-11-12
 
 A reliability release. DDC controls now reach the right monitor when two are

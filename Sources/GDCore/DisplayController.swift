@@ -245,6 +245,10 @@ public final class DisplayController: ObservableObject {
     public struct DDCInfo: Equatable {
         /// nil while unknown, false when the monitor never answered.
         public var responsive: Bool?
+        /// True when the monitor only answers through its USB HID bridge.
+        public var usesUSB = false
+        /// True when the video cable returns the DDC/CI Null Message.
+        public var refused = false
         public var capabilities: DDCCapabilities?
         /// Raw current/maximum per VCP code for the extra controls.
         public var values: [UInt8: DDCValue] = [:]
@@ -264,6 +268,11 @@ public final class DisplayController: ObservableObject {
         display.hasDDC && ddcInfo[display.id]?.responsive == true
     }
 
+    /// DDC/CI works, but only through the monitor's USB connection.
+    public func usesUSBTransport(_ display: DisplayInfo) -> Bool {
+        ddcAvailable(display) && ddcInfo[display.id]?.usesUSB == true
+    }
+
     private static let extraCodes: [DDCController.VCP] = [.colorPreset, .redGain, .greenGain, .blueGain, .sharpness]
     public static let pictureModeCode: UInt8 = 0xDC
 
@@ -277,10 +286,14 @@ public final class DisplayController: ObservableObject {
             guard let self else { return }
             let ddc = self.ddc
             // Brightness doubles as the "is anyone there" probe.
-            guard let brightnessReading = ddc.read(.brightness, display: id) else {
+            let brightnessReading = ddc.reading(code: DDCController.VCP.brightness.rawValue, display: id)
+            guard case let .value(current, maximum) = brightnessReading else {
+                let refused = brightnessReading == .refused
                 DispatchQueue.main.async {
                     var info = self.ddcInfo[id] ?? DDCInfo()
                     info.responsive = false
+                    info.usesUSB = false
+                    info.refused = refused
                     if self.ddcInfo[id] != info { self.ddcInfo[id] = info }
                     if self.brightness[id] == nil { self.brightness[id] = 1.0 }
                 }
@@ -293,11 +306,13 @@ public final class DisplayController: ObservableObject {
             DispatchQueue.main.async {
                 var info = self.ddcInfo[id] ?? DDCInfo()
                 info.responsive = true
+                info.usesUSB = ddc.usesUSB(display: id)
+                info.refused = false
                 if self.ddcInfo[id] != info { self.ddcInfo[id] = info }
                 // Values the user changed while this read was running win.
                 guard !self.isStale(id, readStartedAt: started) else { return }
-                if brightnessReading.maximum > 0 {
-                    self.update(&self.brightness, id, Double(brightnessReading.current) / Double(brightnessReading.maximum))
+                if maximum > 0 {
+                    self.update(&self.brightness, id, Double(current) / Double(maximum))
                 }
                 if let input { self.update(&self.inputSource, id, input & 0xFF) }
                 if let contrastValue { self.update(&self.contrast, id, contrastValue) }

@@ -171,6 +171,19 @@ struct DeviceSection: View {
     @ViewBuilder
     private var moreOptions: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if controller.usesUSBTransport(display) {
+                Text("DDC/CI over USB — the video cable refused it.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 3)
+            } else if controller.ddcInfo[display.id]?.refused == true {
+                Text("DDC/CI is refused on this cable. Check OSD › DDC/CI or install Dell Display and Peripheral Manager.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 3)
+            }
             if general.showVolumeSlider, controller.ddcAvailable(display), let volume = controller.volume(for: display.id) {
                 let muted = controller.mute[display.id] == true
                 SliderRow(value: Binding(get: { controller.volume(for: display.id) ?? volume },
