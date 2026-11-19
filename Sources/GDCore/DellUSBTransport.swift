@@ -259,10 +259,7 @@ final class DellUSBTransport {
             // The USB bridge wraps the monitor's reply in its own envelope,
             // so locate the inner capabilities frame rather than assuming
             // it starts at byte zero.
-            guard let base = (0...max(0, response.count - 6)).first(where: {
-                response[$0] == 0x6E && response[$0 + 2] == 0xE3 &&
-                    Int(response[$0 + 3]) << 8 | Int(response[$0 + 4]) == offset
-            }) else {
+            guard let base = Self.innerFrameOffset(in: response, offset: offset) else {
                 failures += 1
                 continue
             }
@@ -384,6 +381,19 @@ final class DellUSBTransport {
 
     private static func checksum(_ bytes: [UInt8]) -> UInt8 {
         bytes.reduce(0x6E) { $0 ^ $1 }
+    }
+
+    /// Finds the start of the inner capabilities reply (0x6E ... 0xE3) whose
+    /// payload offset matches the request.
+    private static func innerFrameOffset(in response: [UInt8], offset: Int) -> Int? {
+        guard response.count >= 6 else { return nil }
+        for base in 0...(response.count - 6) {
+            guard response[base] == 0x6E, response[base + 2] == 0xE3 else { continue }
+            let high = Int(response[base + 3])
+            let low = Int(response[base + 4])
+            if (high << 8 | low) == offset { return base }
+        }
+        return nil
     }
 
     static func isNullMessage(_ bytes: [UInt8]) -> Bool {
