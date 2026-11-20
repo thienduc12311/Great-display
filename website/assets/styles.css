@@ -438,6 +438,7 @@ section { padding: 120px 0; position: relative; }
 .release li { position: relative; padding-left: 22px; color: #d1d1d6; font-size: 16px; line-height: 1.5; }
 .release li::before { content: ""; position: absolute; left: 4px; top: 0.62em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .release li strong { color: var(--text); }
+.release li .li-para { display: block; height: 0.6em; }
 .release li code { background: rgba(255, 255, 255, 0.08); padding: 1px 5px; border-radius: 5px; }
 .release-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 28px; }
 .release-actions .btn { padding: 9px 18px; font-size: 15px; }

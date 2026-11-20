@@ -9,6 +9,12 @@ change under **Unreleased** in the same pull request.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-19
+
+Monitors that refuse DDC/CI on the video cable, such as the Dell U2723QE, can
+now be controlled over their USB connection, so brightness, contrast and input
+source work on them instead of falling back to software dimming.
+
 ### Added
 
 - Monitors that refuse DDC/CI on the video cable are now driven over their USB
@@ -203,7 +209,8 @@ First public release.
 - Universal (Apple Silicon and Intel) DMG and ZIP builds published by GitHub
   Actions.
 
-[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/thienduc12311/Great-display/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/thienduc12311/Great-display/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/thienduc12311/Great-display/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thienduc12311/Great-display/releases/tag/v1.0.0

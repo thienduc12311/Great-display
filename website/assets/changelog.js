@@ -25,7 +25,9 @@
   function parse(md) {
     const releases = [];
     const links = {};
-    let release = null, section = null, item = null;
+    // `item` is the bullet being read; `gap` is set after a blank line inside
+    // it, so an indented paragraph that follows still belongs to that bullet.
+    let release = null, section = null, item = null, gap = false;
     for (const raw of md.split(/\r?\n/)) {
       const line = raw.replace(/\s+$/, "");
       let m;
@@ -38,13 +40,15 @@
       if ((m = line.match(/^### (.+)/))) { section = { title: m[1], items: [] }; release.sections.push(section); item = null; continue; }
       if ((m = line.match(/^[-*] (.+)/))) {
         if (!section) { section = { title: "", items: [] }; release.sections.push(section); }
-        item = m[1]; section.items.push(item); continue;
+        item = m[1]; gap = false; section.items.push(item); continue;
       }
-      if (line.trim() === "") { item = null; continue; }
+      if (line.trim() === "") { if (item !== null) gap = true; continue; }
       if (item !== null && /^\s+/.test(line) && section) {
-        section.items[section.items.length - 1] += " " + line.trim();
+        section.items[section.items.length - 1] += (gap ? "\n\n" : " ") + line.trim();
+        gap = false;
         continue;
       }
+      item = null; gap = false;
       if (!section) release.intro.push(line.trim());
     }
     for (const r of releases) r.link = links[r.version];
@@ -73,7 +77,7 @@
       let items = s.items;
       if (opts.teaser) items = items.slice(0, opts.teaser);
       if (s.title) html += `<h4>${escapeHTML(s.title)}</h4>`;
-      html += `<ul>${items.map((i) => `<li>${inline(i)}</li>`).join("")}</ul>`;
+      html += `<ul>${items.map((i) => `<li>${i.split("\n\n").map(inline).join('<span class="li-para"></span>')}</li>`).join("")}</ul>`;
     }
     html += `<div class="release-actions">`;
     if (opts.teaser) {
@@ -112,7 +116,7 @@
             return `<a class="chip" href="#${unreleased ? "unreleased" : "v" + r.version}">${unreleased ? "Next" : escapeHTML(r.version)}</a>`;
           }).join("");
         }
-        if (location.hash) document.querySelector(location.hash)?.scrollIntoView();
+        if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
       } catch (e) { fallback(el); }
     },
     /** Fills `el` with a short summary of the newest release and sets version labels. */
