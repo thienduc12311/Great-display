@@ -9,6 +9,30 @@ change under **Unreleased** in the same pull request.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-21
+
+Great Display now updates itself, and monitors behind a DisplayLink dock can
+switch inputs through an experimental bridge.
+
+### Added
+
+- **Automatic updates.** Great Display checks GitHub for a new release every
+  time it starts and once a day. When one is out, a window shows its release
+  notes with **Install Update**, **Later** and **Skip This Version**. Install
+  Update downloads the release's zip, checks it against the published
+  `SHA256SUMS.txt`, verifies the app's code signature, bundle identifier and
+  version, then replaces the app and restarts it. The menu shows an
+  **Update** badge while a release is waiting, **Tools › Check for Updates…**
+  checks on demand, and Settings › About has a Software Update section with
+  a switch for the automatic checks.
+- **Experimental (beta):** input source switching for monitors behind a
+  DisplayLink dock, off by default. Turn it on under Settings › General ›
+  Experimental › DisplayLink input switching. It needs a patched open-source
+  build of DisplayLink's DDC bridge (`libdlmddc.dylib`) loaded into DisplayLink
+  Manager; stock DisplayLink Manager cannot change inputs. The menu then shows
+  "Input Source (Beta)" for DisplayLink monitors that macOS cannot reach over
+  DDC/CI, and `--displaylink-probe` reports the bridge and each monitor's input.
+
 ## [1.2.0] - 2026-11-19
 
 Monitors that refuse DDC/CI on the video cable, such as the Dell U2723QE, can
@@ -209,7 +233,8 @@ First public release.
 - Universal (Apple Silicon and Intel) DMG and ZIP builds published by GitHub
   Actions.
 
-[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/thienduc12311/Great-display/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/thienduc12311/Great-display/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/thienduc12311/Great-display/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/thienduc12311/Great-display/compare/v1.0.0...v1.1.0
