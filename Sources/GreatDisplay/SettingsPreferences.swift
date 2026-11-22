@@ -8,6 +8,7 @@ import ServiceManagement
 struct GeneralSettingsView: View {
     @ObservedObject private var store = SettingsStore.shared
     @ObservedObject private var sleep = SleepController.shared
+    @ObservedObject private var displays = DisplayController.shared
     @State private var launchAtLogin = Self.loginItemRegistered
     @State private var status: String?
     @State private var showDiagnostics = false
@@ -67,6 +68,29 @@ struct GeneralSettingsView: View {
                                   isOn: $store.state.general.showHelp)
             }
 
+            SettingsSectionTitle(title: "Experimental", symbol: "flask")
+            SettingsCard {
+                SettingsRow(title: "DisplayLink input switching",
+                            help: "Beta. Adds an input source picker for monitors behind a DisplayLink dock. Needs a patched open-source build of DisplayLink's DDC bridge (libdlmddc) loaded into DisplayLink Manager; stock DisplayLink Manager cannot change inputs.") {
+                    HStack(spacing: 8) {
+                        StatusChip(text: "Beta", symbol: "flask.fill", tint: .orange)
+                        Toggle("", isOn: Binding(get: { store.state.general.displayLinkInputSwitching },
+                                                 set: { displays.setDisplayLinkInputSwitching($0) }))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                }
+                if store.state.general.displayLinkInputSwitching {
+                    SettingsRowDivider()
+                    SettingsRow(title: "DisplayLink bridge", help: displayLinkHelp) {
+                        HStack(spacing: 8) {
+                            displayLinkChip
+                            Button("Check Again") { displays.refreshDisplayLink() }
+                        }
+                    }
+                }
+            }
+
             SettingsSectionTitle(title: "Troubleshooting", symbol: "stethoscope")
             SettingsCard {
                 DisclosureGroup(isExpanded: $showDiagnostics) {
@@ -88,6 +112,30 @@ struct GeneralSettingsView: View {
                     Button("Reset…", role: .destructive) { confirmReset() }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var displayLinkChip: some View {
+        switch displays.displayLinkStatus {
+        case .available:
+            StatusChip(text: "Installed", symbol: "checkmark", tint: .green)
+        case .notInstalled:
+            StatusChip(text: "Not found", symbol: "xmark", tint: .red)
+        case .checking, .unknown:
+            StatusChip(text: "Checking…", tint: .secondary)
+        }
+    }
+
+    private var displayLinkHelp: String {
+        switch displays.displayLinkStatus {
+        case .available:
+            let count = displays.displayLinkDisplays.count
+            return "The patched bridge answered. \(count) DisplayLink display\(count == 1 ? "" : "s") found."
+        case .notInstalled:
+            return "No answer from the patched bridge. Check that DisplayLink Manager is running with the open-source DDC patch installed."
+        case .checking, .unknown:
+            return "Asking DisplayLink Manager for the patched bridge…"
         }
     }
 
@@ -488,6 +536,9 @@ struct KeyboardSettingsView: View {
 // MARK: - About
 
 struct AboutView: View {
+    @ObservedObject private var updates = UpdateController.shared
+    @ObservedObject private var store = SettingsStore.shared
+
     private var version: String {
         let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
@@ -518,11 +569,72 @@ struct AboutView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 24)
 
+            SettingsSectionTitle(title: "Software Update", symbol: "arrow.down.circle")
+            SettingsCard {
+                SettingsRow(title: updateTitle, help: updateDetail) {
+                    updateActions
+                }
+                if case .downloading(_, let progress) = updates.state {
+                    ProgressView(value: progress)
+                        .padding(.horizontal, SettingsStyle.rowInset)
+                        .padding(.bottom, 10)
+                }
+                SettingsRowDivider()
+                SettingsToggleRow(title: "Check for updates automatically",
+                                  help: "Checks GitHub when Great Display starts and once a day, and offers to install a new release.",
+                                  isOn: Binding(get: { store.state.general.automaticallyCheckForUpdates },
+                                                set: { value in
+                                                    store.state.general.automaticallyCheckForUpdates = value
+                                                    updates.startAutomaticChecks()
+                                                }))
+            }
+            .padding(.bottom, 16)
+
             Text("Independent, open-source implementation. Uses public display APIs plus system-private display services resolved at runtime; those can change between macOS releases.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var updateTitle: String {
+        switch updates.state {
+        case .checking: return "Checking for updates…"
+        case .upToDate: return "Great Display is up to date"
+        case .downloading(let release, _): return "Downloading \(release.version)…"
+        case .installing(let release): return "Installing \(release.version)…"
+        case .available(let release): return "Version \(release.version) is available"
+        case .failed: return "Update failed"
+        case .idle: return "Updates"
+        }
+    }
+
+    private var updateDetail: String {
+        switch updates.state {
+        case .upToDate(let date):
+            return "Version \(updates.currentVersion) is the newest release. Checked \(date.formatted(date: .omitted, time: .shortened))."
+        case .failed(let message): return message
+        case .available: return "Downloads from GitHub, verifies the checksum and signature, installs and restarts."
+        default: return "Releases are published on GitHub."
+        }
+    }
+
+    @ViewBuilder
+    private var updateActions: some View {
+        switch updates.state {
+        case .available:
+            Button("Release Notes") { UpdateWindowController.shared.show() }
+            Button("Install Update") { updates.downloadAndInstall() }
+                .buttonStyle(.borderedProminent)
+        case .downloading:
+            Button("Cancel") { updates.cancelDownload() }
+        case .checking, .installing:
+            ProgressView().controlSize(.small)
+        case .failed where updates.availableRelease != nil:
+            Button("Try Again") { updates.downloadAndInstall() }
+        default:
+            Button("Check for Updates") { updates.check() }
         }
     }
 

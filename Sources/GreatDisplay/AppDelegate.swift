@@ -72,6 +72,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DisplayController.shared.restoreSavedConfigurations()
         }
 
+        // Check GitHub for a new release at launch (and daily); a newer one
+        // opens the update prompt. Development snapshots skip this.
+        let updates = UpdateController.shared
+        let snapshot = CommandLine.arguments.contains { $0 == "--render-menu" || $0 == "--preview-menu" }
+        if CommandLine.arguments.contains("--update-now") {
+            // Development aid: check now and install whatever is newer.
+            updates.onUpdateFound = { _ in updates.downloadAndInstall() }
+            updates.check(userInitiated: false)
+        } else if !snapshot {
+            updates.onUpdateFound = { _ in UpdateWindowController.shared.show() }
+            updates.startAutomaticChecks()
+        }
+
         if general.preventSleep {
             SleepController.shared.setPreventSleep(true)
         }

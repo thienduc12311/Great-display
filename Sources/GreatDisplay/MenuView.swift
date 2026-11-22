@@ -73,6 +73,7 @@ struct MenuView: View {
     @ObservedObject private var virtualScreens = VirtualScreenManager.shared
     @ObservedObject private var state = MenuState.shared
     @ObservedObject private var sleep = SleepController.shared
+    @ObservedObject private var updates = UpdateController.shared
     @ObservedObject private var keyboard = KeyboardController.shared
     let onOpenSettings: (SettingsPane?) -> Void
 
@@ -192,6 +193,20 @@ struct MenuView: View {
                 .buttonStyle(.plain)
                 .help("\(keyboard.conflictingApps.compactMap(\.localizedName).joined(separator: ", ")) is also handling the brightness keys")
             }
+            if let release = updates.availableRelease {
+                Button {
+                    UpdateWindowController.shared.show()
+                } label: {
+                    Label("Update \(release.version)", systemImage: "arrow.down.circle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.green.opacity(0.2)))
+                        .foregroundStyle(.green)
+                }
+                .buttonStyle(.plain)
+                .help("Great Display \(release.version) is available")
+            }
             Spacer()
             if sleep.isPreventingSleep {
                 Image(systemName: "cup.and.saucer.fill")
@@ -301,6 +316,10 @@ struct ToolsSection: View {
                 sleep.setPreventSleep(!sleep.isPreventingSleep)
             }
             MenuRow(symbol: "arrow.clockwise", title: "Redetect Displays") { controller.redetect() }
+            MenuRow(symbol: "arrow.down.circle", title: "Check for Updates…") {
+                UpdateController.shared.check()
+                UpdateWindowController.shared.show()
+            }
             MenuRow(symbol: "gearshape", title: "Settings…") { onOpenSettings(nil) }
         }
     }

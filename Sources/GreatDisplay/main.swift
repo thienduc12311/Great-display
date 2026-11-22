@@ -626,6 +626,25 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
         print("volume keys → \(controller.volumeKeyTarget()?.name ?? "macOS (not routed to DDC)")")
         return 0
 
+    case "--displaylink-probe":
+        // Experimental DisplayLink bridge: read-only. Pings the patched bridge,
+        // lists DisplayLink displays and reads each one's input source.
+        let bridge = DisplayLinkBridge.shared
+        bridge.activate()
+        RunLoop.main.run(until: Date().addingTimeInterval(2.5))
+        print("bridge: \(bridge.status)")
+        guard case .available = bridge.status else { return 4 }
+        for display in bridge.displays.values.sorted(by: { $0.displayID < $1.displayID }) {
+            var input: Int?
+            var finished = false
+            bridge.inputSource(for: display.displayID) { input = $0; finished = true }
+            let deadline = Date().addingTimeInterval(7)
+            while !finished && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+            let text = input.map { String(format: "0x%02X %@", $0, InputSource.named($0).name) } ?? "no reply"
+            print("\(display.displayID)  \(display.persistentID)  input=\(text)")
+        }
+        return 0
+
     case "--ddc-burst":
         // Simulates a fast slider drag on a DDC monitor and checks the writes
         // keep up: 30 changes in 0.6 s, then the monitor must hold the last one.
@@ -750,10 +769,10 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
 let applicationArguments = CommandLine.arguments
 let commands: Set<String> = ["--probe", "--set-brightness", "--set-resolution", "--toggle-hidpi",
                              "--create-virtual", "--ddc-read", "--ddc-write", "--ddc-diag", "--ddc-caps", "--usb-probe", "--mirror",
-                             "--rotate", "--hdr", "--disconnect", "--reconnect", "--system-colors", "--adjust", "--self-test", "--audio-output", "--ddc-burst",
+                             "--rotate", "--hdr", "--disconnect", "--reconnect", "--system-colors", "--adjust", "--self-test", "--audio-output", "--ddc-burst", "--displaylink-probe",
                              "--mirror-demo", "--stream-check", "--stream-test"]
 /// Flags handled by the app itself after launch (development aids).
-let applicationFlags: Set<String> = ["--preview-menu", "--render-menu", "--show-settings"]
+let applicationFlags: Set<String> = ["--preview-menu", "--render-menu", "--show-settings", "--update-now"]
 if applicationArguments.count > 1 {
     let first = applicationArguments[1]
     if commands.contains(first) {

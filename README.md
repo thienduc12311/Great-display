@@ -57,6 +57,16 @@ Each release lists its changes in the release notes and in
 [CHANGELOG.md](CHANGELOG.md), and ships a `SHA256SUMS.txt` to verify the
 download (`shasum -a 256 -c SHA256SUMS.txt`).
 
+### Updates
+
+Great Display checks GitHub for a new release when it starts and once a day.
+When one is available it shows the release notes and offers **Install
+Update**: the app downloads the release zip, verifies it against
+`SHA256SUMS.txt` and its code signature, replaces itself and restarts. Use
+**Tools › Check for Updates…** in the menu to check on demand, or turn the
+automatic check off in **Settings › About**. Installing in place needs write
+access to the folder the app is in, such as `/Applications`.
+
 ### Permissions
 
 | Permission | Needed for |
@@ -83,6 +93,27 @@ running, and Great Display never launches it or its command-line tool. Without
 that SDK those monitors fall back to software dimming. Monitors that expose a
 Realtek vendor HID bridge, and monitors that answer DDC/CI on the video cable
 normally, need neither the SDK nor DDPM.
+
+### DisplayLink input switching (experimental)
+
+> **Beta.** Off by default, and may stop working after a DisplayLink update.
+
+Monitors behind a DisplayLink dock are driven by DisplayLink Manager, not the
+Mac's GPU, so macOS has no DDC/CI path to them, and DisplayLink Manager's own
+API only offers brightness and contrast. This feature talks to a **patched
+open-source build of DisplayLink's DDC bridge** (`libdlmddc.dylib`, loaded into
+DisplayLink Manager) that adds input source switching through the same
+distributed-notification API DisplayLink already uses
+(`com.displaylink.GetInputSource` / `SetInputSource`). It is not part of
+DisplayLink's official software.
+
+To try it, install the patched bridge, then turn on **Settings › General ›
+Experimental › DisplayLink input switching**. The Experimental card shows
+whether the bridge answered. DisplayLink monitors then get an
+**Input Source (Beta)** row in the menu and an input picker on their settings
+page. Monitors that answer DDC/CI directly keep using the native path.
+`GreatDisplay --displaylink-probe` checks the bridge and prints each DisplayLink
+monitor's current input without changing anything.
 
 ### Build from source
 
@@ -164,6 +195,7 @@ GreatDisplay --ddc-write <displayID> <vcpHex> <rawValue>
 GreatDisplay --ddc-diag <displayID>
 GreatDisplay --ddc-caps <displayID>
 GreatDisplay --usb-probe <displayID> <vcpHex>
+GreatDisplay --displaylink-probe
 GreatDisplay --mirror <sourceID> <targetID|off>
 GreatDisplay --mirror-demo <targetID> [seconds]
 GreatDisplay --stream-check
@@ -260,6 +292,8 @@ hardware are in [docs/TECHNICAL-NOTES.md](docs/TECHNICAL-NOTES.md).
 - Some monitors, docks and hubs do not tunnel DDC/CI. A monitor that refuses
   DDC/CI on the video cable is driven over its USB connection instead, where
   the app can reach one; see "Monitors that refuse DDC/CI" above.
+- DisplayLink monitors only get input switching, and only through the
+  experimental patched bridge; see "DisplayLink input switching" above.
 - Screen streaming requires Screen Recording permission (granted once; the
   build keeps a stable signing requirement so it survives rebuilds).
 - EDID override writing, HDR/XDR brightness upscaling, picture-in-picture and

@@ -295,10 +295,11 @@ struct DeviceSection: View {
             }
         }
 
-        if controller.ddcAvailable(display) && !display.isVirtual {
+        if controller.canSwitchInput(display) {
             let currentInput = controller.inputSource[display.id]
             let sources = controller.inputSources(for: display)
-            FeatureRow(symbol: "cable.connector", title: "Input Source",
+            let displayLink = controller.usesDisplayLinkInput(display)
+            FeatureRow(symbol: "cable.connector", title: displayLink ? "Input Source (Beta)" : "Input Source",
                        value: currentInput.map { InputSource.named($0).name },
                        isExpanded: state.isOpen(key, .input)) { state.toggle(key, .input) }
             if state.isOpen(key, .input) {
@@ -308,14 +309,18 @@ struct DeviceSection: View {
                             controller.setInputSource(source, for: display)
                         }
                     }
-                    Text("Switching away from the Mac's input shows another source on the monitor.")
+                    Text(displayLink
+                         ? "Experimental: switched through a patched open-source DisplayLink bridge."
+                         : "Switching away from the Mac's input shows another source on the monitor.")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 3)
                 }
             }
+        }
 
+        if controller.ddcAvailable(display) && !display.isVirtual {
             FeatureRow(symbol: "slider.horizontal.2.square", title: "Device Control",
                        value: controller.ddcInfo[display.id]?.capabilities?.model ?? "DDC/CI",
                        isExpanded: state.isOpen(key, .deviceControl)) { state.toggle(key, .deviceControl) }

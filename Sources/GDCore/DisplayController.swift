@@ -22,6 +22,12 @@ public final class DisplayController: ObservableObject {
     @Published public private(set) var hdrCapable: Set<CGDirectDisplayID> = []
     @Published public private(set) var hdrEnabled: Set<CGDirectDisplayID> = []
     @Published public private(set) var disconnected: [DisconnectedDisplay] = []
+    /// Experimental DisplayLink input switching: bridge state and the displays
+    /// DisplayLink Manager reports (see `DisplayLinkBridge`).
+    @Published public private(set) var displayLinkStatus: DisplayLinkBridge.Status = .unknown
+    @Published public private(set) var displayLinkDisplays: Set<CGDirectDisplayID> = []
+    private var displayLinkInputCodes: [CGDirectDisplayID: [Int]] = [:]
+    private var displayLinkLoaded: Set<CGDirectDisplayID> = []
 
     private var cancellables: Set<AnyCancellable> = []
     private let manager = DisplayManager.shared
@@ -48,8 +54,11 @@ public final class DisplayController: ObservableObject {
                 }
                 self.refreshValues(for: displays)
                 self.rememberNames(of: displays)
+                if previous.map(\.id) != displays.map(\.id) { DisplayLinkBridge.shared.refresh() }
             }
             .store(in: &cancellables)
+
+        DisplayLinkBridge.shared.onChange = { [weak self] in self?.displayLinkDidChange() }
 
         manager.modeDidChange
             .sink { [weak self] id in
@@ -114,6 +123,8 @@ public final class DisplayController: ObservableObject {
             modeInFlight.remove(id)
             ddcInfo.removeValue(forKey: id)
             lastUserWrite.removeValue(forKey: id)
+            displayLinkInputCodes.removeValue(forKey: id)
+            displayLinkLoaded.remove(id)
             engine.forgetDisplay(id)
         }
         for display in current where oldIdentities[display.id] != display.identity {
@@ -133,6 +144,9 @@ public final class DisplayController: ObservableObject {
         let online = Set(manager.displays.map(\.id))
         manager.disconnected = SettingsStore.shared.state.disconnectedDisplays.filter { !online.contains($0.id) }
         manager.start()
+        if SettingsStore.shared.state.general.displayLinkInputSwitching {
+            DisplayLinkBridge.shared.activate()
+        }
         if autoStartVirtualScreens {
             VirtualScreenManager.shared.startAutoStartScreens()
         } else {
@@ -433,6 +447,9 @@ public final class DisplayController: ObservableObject {
     /// Input sources for the menu: the monitor's own list when its
     /// capabilities string has one, otherwise the common MCCS values.
     public func inputSources(for display: DisplayInfo) -> [InputSource] {
+        if usesDisplayLinkInput(display) {
+            return displayLinkInputCodes[display.id].map { $0.map { InputSource.named($0) } } ?? InputSource.common
+        }
         guard let values = ddcInfo[display.id]?.capabilities?.values(for: .inputSource), !values.isEmpty else {
             return InputSource.common
         }
@@ -719,6 +736,10 @@ public final class DisplayController: ObservableObject {
     // MARK: Input source
 
     public func setInputSource(_ source: InputSource, for display: DisplayInfo) {
+        if usesDisplayLinkInput(display) {
+            setDisplayLinkInputSource(source, for: display)
+            return
+        }
         guard ddcAvailable(display) else { return }
         inputSource[display.id] = source.value
         let id = display.id
@@ -735,6 +756,95 @@ public final class DisplayController: ObservableObject {
                     // Show the input the monitor is really on again.
                     if let self, let display = self.display(id) { self.loadDDCValues(for: display, full: false) }
                 }
+            }
+        }
+    }
+
+    /// The input picker is shown: DDC/CI works, or the experimental
+    /// DisplayLink bridge can switch this monitor's input.
+    public func canSwitchInput(_ display: DisplayInfo) -> Bool {
+        guard !display.isVirtual else { return false }
+        return ddcAvailable(display) || usesDisplayLinkInput(display)
+    }
+
+    // MARK: DisplayLink input switching (experimental)
+
+    /// True when this monitor's input is switched through the patched
+    /// DisplayLink bridge. Only with the beta setting on, and only for
+    /// monitors macOS cannot reach over DDC/CI itself.
+    public func usesDisplayLinkInput(_ display: DisplayInfo) -> Bool {
+        guard SettingsStore.shared.state.general.displayLinkInputSwitching,
+              case .available = displayLinkStatus,
+              displayLinkDisplays.contains(display.id) else { return false }
+        return !ddcAvailable(display)
+    }
+
+    /// The display is driven by DisplayLink Manager (whether or not the
+    /// patched bridge is installed).
+    public func isDisplayLinkDisplay(_ display: DisplayInfo) -> Bool {
+        displayLinkDisplays.contains(display.id)
+    }
+
+    public func setDisplayLinkInputSwitching(_ enabled: Bool) {
+        SettingsStore.shared.state.general.displayLinkInputSwitching = enabled
+        if enabled {
+            DisplayLinkBridge.shared.activate()
+        } else {
+            DisplayLinkBridge.shared.deactivate()
+        }
+    }
+
+    /// Re-checks the bridge and re-reads DisplayLink inputs.
+    public func refreshDisplayLink() {
+        displayLinkLoaded.removeAll()
+        DisplayLinkBridge.shared.refresh()
+    }
+
+    private func displayLinkDidChange() {
+        let bridge = DisplayLinkBridge.shared
+        if displayLinkStatus != bridge.status { displayLinkStatus = bridge.status }
+        let ids = Set(bridge.displays.keys)
+        if displayLinkDisplays != ids { displayLinkDisplays = ids }
+        displayLinkLoaded.formIntersection(ids)
+        guard case .available = bridge.status else { return }
+        for display in displays where usesDisplayLinkInput(display) && !displayLinkLoaded.contains(display.id) {
+            displayLinkLoaded.insert(display.id)
+            loadDisplayLinkInput(for: display, capabilities: displayLinkInputCodes[display.id] == nil)
+        }
+    }
+
+    private func loadDisplayLinkInput(for display: DisplayInfo, capabilities: Bool) {
+        let id = display.id
+        let generation = displayGenerations[id, default: 0]
+        let bridge = DisplayLinkBridge.shared
+        bridge.inputSource(for: id) { [weak self] value in
+            guard let self, let value, self.displayGenerations[id, default: 0] == generation else { return }
+            self.update(&self.inputSource, id, value)
+        }
+        guard capabilities else { return }
+        bridge.inputSources(for: id) { [weak self] codes in
+            guard let self, let codes, self.displayGenerations[id, default: 0] == generation else { return }
+            self.displayLinkInputCodes[id] = codes
+        }
+    }
+
+    private func setDisplayLinkInputSource(_ source: InputSource, for display: DisplayInfo) {
+        let id = display.id
+        let name = display.name
+        let previous = inputSource[id]
+        inputSource[id] = source.value
+        DisplayLinkBridge.shared.setInputSource(source.value, for: id) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                OSDController.shared.show(symbol: "exclamationmark.triangle.fill",
+                                          title: "\(name) did not accept the input switch", value: 1,
+                                          detail: "DisplayLink (beta): \(error)")
+                if self.inputSource[id] == source.value {
+                    if let previous { self.inputSource[id] = previous } else { self.inputSource.removeValue(forKey: id) }
+                }
+            } else {
+                OSDController.shared.show(symbol: source.symbol, title: "\(name) — \(source.name)", value: 1,
+                                          detail: "Input switched through DisplayLink (beta)")
             }
         }
     }
@@ -799,6 +909,7 @@ public final class DisplayController: ObservableObject {
     /// adjusted in the last few seconds, and retries monitors that never answered.
     public func menuWillOpen() {
         manager.refresh()
+        if DisplayLinkBridge.shared.isActive { refreshDisplayLink() }
         for display in displays where display.hasDDC {
             if ddcInfo[display.id]?.responsive != true {
                 loadDDCValues(for: display, full: true)

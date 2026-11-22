@@ -28,6 +28,13 @@ public struct GeneralSettings: Codable, Equatable {
     public var reconnectDisplaysOnQuit: Bool = true
     // Settings window
     public var showHelp: Bool = true
+    // Experimental
+    /// Beta: switch the input of monitors behind a DisplayLink dock through a
+    /// patched open-source DisplayLink DDC bridge (see `DisplayLinkBridge`).
+    public var displayLinkInputSwitching: Bool = false
+    // Updates
+    /// Check GitHub for a new release at launch and once a day.
+    public var automaticallyCheckForUpdates: Bool = true
 
     public init() {}
 
@@ -59,6 +66,8 @@ public struct GeneralSettings: Codable, Equatable {
         preventSleep = v(.preventSleep, d.preventSleep)
         reconnectDisplaysOnQuit = v(.reconnectDisplaysOnQuit, d.reconnectDisplaysOnQuit)
         showHelp = v(.showHelp, d.showHelp)
+        displayLinkInputSwitching = v(.displayLinkInputSwitching, d.displayLinkInputSwitching)
+        automaticallyCheckForUpdates = v(.automaticallyCheckForUpdates, d.automaticallyCheckForUpdates)
     }
 }
 

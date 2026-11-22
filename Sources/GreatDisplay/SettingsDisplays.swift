@@ -846,6 +846,8 @@ private struct DeviceControlCard: View {
     var body: some View {
         if controller.ddcAvailable(display) {
             available
+        } else if controller.usesDisplayLinkInput(display) {
+            displayLinkInput
         } else if display.hasDDC && controller.ddcInfo[display.id]?.responsive == false {
             let refused = controller.ddcInfo[display.id]?.refused == true
             Callout(symbol: "exclamationmark.triangle.fill", tint: .orange,
@@ -872,6 +874,45 @@ private struct DeviceControlCard: View {
         }
     }
 
+    /// Experimental: input switching through the patched DisplayLink bridge.
+    @ViewBuilder
+    private var displayLinkInput: some View {
+        SettingsCard {
+            SettingsIconHeader(symbol: "cable.connector.horizontal", title: "Connected through DisplayLink", tint: .purple,
+                               subtitle: "Input switching only · experimental") {
+                StatusChip(text: "Beta", symbol: "flask.fill", tint: .orange)
+            }
+        }
+        Callout(symbol: "flask.fill", tint: .orange,
+                title: "Experimental DisplayLink input switching",
+                message: "This uses a patched open-source build of DisplayLink's DDC bridge that lets apps change the monitor's input source. It is not part of DisplayLink Manager and may stop working after a DisplayLink update. Turn it off in General › Experimental.") {
+            EmptyView()
+        }
+
+        SettingsSectionTitle(title: "Input", symbol: "arrow.left.arrow.right")
+        SettingsCard {
+            SettingsRow(title: "Input source",
+                        help: "Switching away from the dock's input shows another source on the monitor. Switch back with the monitor's buttons if it stops answering.") {
+                inputPicker
+            }
+        }
+    }
+
+    private var inputPicker: some View {
+        Picker("", selection: Binding(
+            get: { controller.inputSource[display.id] ?? -1 },
+            set: { value in
+                if let source = controller.inputSources(for: display).first(where: { $0.value == value }) {
+                    controller.setInputSource(source, for: display)
+                }
+            })) {
+            if controller.inputSource[display.id] == nil { Text("Unknown").tag(-1) }
+            ForEach(controller.inputSources(for: display)) { Text($0.name).tag($0.value) }
+        }
+        .labelsHidden()
+        .frame(width: 180)
+    }
+
     @ViewBuilder
     private var available: some View {
         let info = controller.ddcInfo[display.id]
@@ -895,18 +936,7 @@ private struct DeviceControlCard: View {
         SettingsSectionTitle(title: "Input", symbol: "arrow.left.arrow.right")
         SettingsCard {
             SettingsRow(title: "Input source", help: "Switching away from the Mac's input shows another source on the monitor.") {
-                Picker("", selection: Binding(
-                    get: { controller.inputSource[display.id] ?? -1 },
-                    set: { value in
-                        if let source = controller.inputSources(for: display).first(where: { $0.value == value }) {
-                            controller.setInputSource(source, for: display)
-                        }
-                    })) {
-                    if controller.inputSource[display.id] == nil { Text("Unknown").tag(-1) }
-                    ForEach(controller.inputSources(for: display)) { Text($0.name).tag($0.value) }
-                }
-                .labelsHidden()
-                .frame(width: 180)
+                inputPicker
             }
         }
 
