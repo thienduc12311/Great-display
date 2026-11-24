@@ -139,8 +139,8 @@ See [Building](#building) for options.
 | App menu | Collapsible section per display with a connect switch, combined brightness and resolution sliders on the first level, and a "more options" level with feature panels |
 | Resolutions | Resolution slider (one step per size, Default/Native markers, applies on release) and a Display Mode list with HiDPI/LoDPI, refresh-rate and aspect-ratio filters |
 | Refresh rate | Rates available for the current size and density |
-| HiDPI | Toggles between the low-density and pixel-doubled mode of the current geometry |
-| Virtual screens | Created from an aspect-ratio preset, a custom ratio, or matched to a display; a flexible resolution ladder (≈40 sizes) per aspect ratio; size, aspect ratio, density and refresh rate change live without reconnecting; optional over-8K ceiling (16K); mirror target and auto-start |
+| HiDPI | Toggles between the low-density and pixel-doubled mode of the current geometry, plus custom HiDPI display overrides (`scale-resolutions`) for physical displays |
+| Virtual screens | Created from an aspect-ratio preset, a custom ratio, or matched to a display; a dense 56-step flexible resolution ladder up to the framebuffer ceiling plus live custom resolutions; size, aspect ratio, density and refresh rate change live without reconnecting; optional over-8K ceiling (16K); mirror target and auto-start |
 | Associated displays | A virtual screen can be associated with several displays (including disconnected ones). Options: auto-connect while an associated display is online, or while all are offline; enforce mirroring; auto-start full-screen streaming; follow the associated display's orientation |
 | Brightness | Native panel brightness on Apple displays, DDC/CI on external displays, gamma-table dimming everywhere |
 | Combined brightness | One knob: hardware above the "Min HW" marker, gamma dimming below it |
@@ -189,6 +189,7 @@ GreatDisplay --probe
 GreatDisplay --set-brightness <displayID> <0..1>
 GreatDisplay --set-resolution <displayID> <width> <height> [hidpi|lodpi] [hz]
 GreatDisplay --toggle-hidpi <displayID>
+GreatDisplay --hidpi-override <displayID> <list|presets|add <WxH[:lodpi]>…|remove>
 GreatDisplay --create-virtual <width> <height> [holdSeconds]
 GreatDisplay --ddc-read <displayID>
 GreatDisplay --ddc-write <displayID> <vcpHex> <rawValue>

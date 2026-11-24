@@ -305,7 +305,7 @@ struct VirtualScreenPage: View {
             }
             SettingsRowDivider()
             SettingsRow(title: "Default resolution",
-                        help: "The desktop size the screen starts at. With the flexible list on, every size in this aspect ratio up to 1.5× is available in the menu's resolution slider and Display Mode list.") {
+                        help: "The desktop size the screen starts at. With the flexible list on, a dense ladder of sizes in this aspect ratio up to the framebuffer limit is available in the menu's resolution slider and Display Mode list.") {
                 HStack(spacing: 6) {
                     Stepper("\(String(configuration.width)) × \(String(configuration.height))", onIncrement: { scale(configuration, by: 1.1) },
                             onDecrement: { scale(configuration, by: 1 / 1.1) })
@@ -348,6 +348,10 @@ struct VirtualScreenPage: View {
         if let display {
             ResolutionCardForVirtual(display: display)
         }
+
+        CustomVirtualResolutionsCard(configuration: configuration,
+                                     display: display,
+                                     apply: { apply($0) })
 
         AssociatedDisplaysCard(configuration: configuration,
                                virtualDisplayID: display?.id,
@@ -549,6 +553,116 @@ private struct ResolutionCardForVirtual: View {
         return display.modes
             .sorted { $0.width == $1.width ? $0.isHiDPI && !$1.isHiDPI : $0.width > $1.width }
             .filter { seen.insert("\($0.width)x\($0.height)-\($0.isHiDPI)").inserted }
+    }
+}
+
+/// Custom logical resolutions published live on a virtual screen alongside
+/// its default size and flexible ladder.
+private struct CustomVirtualResolutionsCard: View {
+    let configuration: VirtualScreenConfiguration
+    let display: DisplayInfo?
+    let apply: (VirtualScreenConfiguration) -> Void
+
+    @ObservedObject private var controller = DisplayController.shared
+    @State private var widthText = ""
+    @State private var heightText = ""
+    @State private var lockAspect = true
+
+    private var aspect: Double {
+        Double(max(1, configuration.width)) / Double(max(1, configuration.height))
+    }
+
+    private var maxLogical: Int {
+        VirtualScreenManager.maximumPixels(for: configuration) / (configuration.hiDPI ? 2 : 1)
+    }
+
+    private var canAdd: Bool {
+        guard let w = Int(widthText), let h = Int(heightText) else { return false }
+        return w >= VirtualScreenManager.minimumSide && h >= 200 && w <= maxLogical && h <= maxLogical
+    }
+
+    var body: some View {
+        SettingsSectionTitle(title: "Custom Resolutions", symbol: "sparkles")
+        SettingsCard {
+            SettingsHelpText(text: "Add exact logical resolutions to this virtual screen (up to \(maxLogical) × \(maxLogical)\(configuration.hiDPI ? " HiDPI" : "")). Changes apply live without reconnecting.")
+            SettingsRowDivider()
+            SettingsRow(title: "Add resolution") {
+                HStack(spacing: 6) {
+                    TextField("Width", text: $widthText)
+                        .frame(width: 64)
+                        .multilineTextAlignment(.trailing)
+                        .onChange(of: widthText) { _, newValue in
+                            guard lockAspect, let w = Int(newValue), w > 0 else { return }
+                            let h = Int((Double(w) / aspect / 2).rounded()) * 2
+                            if h > 0, heightText != "\(h)" { heightText = "\(h)" }
+                        }
+                        .onSubmit { addCustom() }
+                    Text("×").foregroundStyle(.secondary)
+                    TextField("Height", text: $heightText)
+                        .frame(width: 64)
+                        .multilineTextAlignment(.trailing)
+                        .disabled(lockAspect)
+                        .onSubmit { addCustom() }
+                    Button { lockAspect.toggle() } label: {
+                        Image(systemName: lockAspect ? "lock.fill" : "lock.open")
+                            .frame(width: 18)
+                    }
+                    .help(lockAspect ? "Aspect ratio locked to \(configuration.aspectDescription)" : "Free aspect ratio")
+                    Button("Add") { addCustom() }
+                        .disabled(!canAdd)
+                }
+            }
+            if !configuration.customResolutions.isEmpty {
+                SettingsRowDivider()
+                ForEach(Array(configuration.customResolutions.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 { SettingsRowDivider() }
+                    let density = configuration.hiDPI ? 2 : 1
+                    HStack(spacing: 8) {
+                        Text(item.resolutionText)
+                            .font(.system(size: 12.5, weight: .medium).monospacedDigit())
+                        if configuration.hiDPI {
+                            StatusChip(text: "HiDPI", tint: .purple)
+                        }
+                        Text("\(item.width * density) × \(item.height * density) px · \(item.aspectRatio)")
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if let display,
+                           let mode = display.modes.first(where: {
+                               $0.width == item.width && $0.height == item.height && $0.isHiDPI == configuration.hiDPI
+                           }) {
+                            Button("Use") { controller.setMode(mode, for: display) }
+                                .controlSize(.small)
+                        }
+                        Button {
+                            var copy = configuration
+                            copy.customResolutions.removeAll { $0.id == item.id }
+                            apply(copy)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove \(item.resolutionText)")
+                    }
+                    .padding(.horizontal, SettingsStyle.rowInset)
+                    .padding(.vertical, 7)
+                }
+            }
+        }
+    }
+
+    private func addCustom() {
+        guard let w = Int(widthText), let h = Int(heightText), canAdd else { return }
+        let entry = CustomResolution(width: w, height: h, hiDPI: configuration.hiDPI)
+        var copy = configuration
+        if !copy.customResolutions.contains(where: { $0.width == entry.width && $0.height == entry.height }) {
+            copy.customResolutions.append(entry)
+            copy.customResolutions.sort { $0.width == $1.width ? $0.height > $1.height : $0.width > $1.width }
+            apply(copy)
+        }
+        widthText = ""
+        heightText = ""
     }
 }
 

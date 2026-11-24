@@ -61,6 +61,36 @@ public struct ModeInfo: Identifiable {
     }
 }
 
+/// A user-defined logical resolution used for both physical display HiDPI
+/// overrides (`scale-resolutions`) and custom modes on virtual screens.
+public struct CustomResolution: Codable, Hashable, Identifiable {
+    public var width: Int
+    public var height: Int
+    public var hiDPI: Bool
+
+    public var id: String { "\(width)x\(height)-\(hiDPI ? "hidpi" : "lodpi")" }
+
+    public init(width: Int, height: Int, hiDPI: Bool = true) {
+        self.width = max(320, (width / 2) * 2)
+        self.height = max(200, (height / 2) * 2)
+        self.hiDPI = hiDPI
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let w = try c.decode(Int.self, forKey: .width)
+        let h = try c.decode(Int.self, forKey: .height)
+        let hidpi = (try? c.decodeIfPresent(Bool.self, forKey: .hiDPI)) ?? true
+        self.init(width: w, height: h, hiDPI: hidpi)
+    }
+
+    public var pixelWidth: Int { hiDPI ? width * 2 : width }
+    public var pixelHeight: Int { hiDPI ? height * 2 : height }
+    public var resolutionText: String { "\(width) × \(height)" }
+    public var summary: String { "\(width) × \(height)\(hiDPI ? " HiDPI" : "")" }
+    public var aspectRatio: String { ModeInfo.aspectLabel(width: width, height: height) }
+}
+
 /// Everything the UI needs to know about a connected display.
 public struct DisplayInfo: Identifiable, Hashable {
     public let id: CGDirectDisplayID

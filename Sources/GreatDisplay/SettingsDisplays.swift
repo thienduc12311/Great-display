@@ -308,6 +308,9 @@ struct DisplayDetailPage: View {
             case .picture:
                 BrightnessCard(display: display)
                 ResolutionCard(display: display)
+                if DisplayOverrideManager.shared.canOverride(display) {
+                    CustomHiDPICard(display: display)
+                }
             case .color:
                 ColorAdjustmentsView(display: display)
             case .monitor:
@@ -550,6 +553,266 @@ private struct ResolutionCard: View {
     private var hasDensityCounterpart: Bool {
         guard let mode = currentMode else { return false }
         return display.modes.contains { $0.width == mode.width && $0.height == mode.height && $0.isHiDPI != mode.isHiDPI }
+    }
+}
+
+/// Manages custom HiDPI display override resolutions (`/Library/Displays/...`)
+/// for a physical display so macOS exposes more scaled HiDPI modes than the
+/// small built-in set.
+private struct CustomHiDPICard: View {
+    let display: DisplayInfo
+    @ObservedObject private var store = SettingsStore.shared
+
+    @State private var resolutions: [CustomResolution] = []
+    @State private var installedResolutions: [CustomResolution] = []
+    @State private var installed = false
+    @State private var widthText = ""
+    @State private var heightText = ""
+    @State private var lockAspect = true
+    @State private var hiDPI = true
+    @State private var busy = false
+    @State private var statusMessage: String?
+    @State private var isError = false
+
+    private var nativeSize: (width: Int, height: Int) {
+        DisplayOverrideManager.nativePixelSize(for: display)
+    }
+
+    private var nativeAspect: Double {
+        Double(nativeSize.width) / Double(max(1, nativeSize.height))
+    }
+
+    private var hasUnsavedChanges: Bool {
+        installed ? resolutions != installedResolutions : !resolutions.isEmpty
+    }
+
+    var body: some View {
+        SettingsSectionTitle(title: "Custom HiDPI Resolutions", symbol: "sparkles")
+        SettingsCard {
+            HStack(spacing: 8) {
+                if installed {
+                    StatusChip(text: "Override installed (\(installedResolutions.count))", symbol: "checkmark.circle.fill", tint: .green)
+                } else {
+                    StatusChip(text: "System defaults", tint: .secondary)
+                }
+                if hasUnsavedChanges {
+                    StatusChip(text: "Unapplied changes", tint: .orange)
+                }
+                Spacer()
+                Text(verbatim: String(format: "%04X:%04X", display.vendorID, display.modelID))
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, SettingsStyle.rowInset)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+
+            SettingsHelpText(text: "Add custom HiDPI resolutions beyond the limited set macOS exposes natively. Writes a display override to /Library/Displays and requires administrator authentication; reconnect the display or restart for macOS to load new modes.")
+
+            SettingsRowDivider()
+
+            SettingsRow(title: "Add resolution") {
+                HStack(spacing: 6) {
+                    TextField("Width", text: $widthText)
+                        .frame(width: 64)
+                        .multilineTextAlignment(.trailing)
+                        .onChange(of: widthText) { _, newValue in
+                            guard lockAspect, let w = Int(newValue), w > 0 else { return }
+                            let h = Int((Double(w) / nativeAspect / 2).rounded()) * 2
+                            if h > 0, heightText != "\(h)" { heightText = "\(h)" }
+                        }
+                        .onSubmit { addResolution() }
+                    Text("×").foregroundStyle(.secondary)
+                    TextField("Height", text: $heightText)
+                        .frame(width: 64)
+                        .multilineTextAlignment(.trailing)
+                        .disabled(lockAspect)
+                        .onSubmit { addResolution() }
+                    Button { lockAspect.toggle() } label: {
+                        Image(systemName: lockAspect ? "lock.fill" : "lock.open")
+                            .frame(width: 18)
+                    }
+                    .help(lockAspect ? "Aspect ratio locked to \(ModeInfo.aspectLabel(width: nativeSize.width, height: nativeSize.height))" : "Free aspect ratio")
+                    Toggle("HiDPI", isOn: $hiDPI)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 12))
+                    Button("Add") { addResolution() }
+                        .disabled(!canAdd)
+                }
+            }
+
+            SettingsRowDivider()
+
+            if resolutions.isEmpty {
+                Text("No custom resolutions configured. Add a size above or load the HiDPI preset pack for this display.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, SettingsStyle.rowInset)
+                    .padding(.vertical, 10)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(resolutions.enumerated()), id: \.element.id) { index, item in
+                            if index > 0 { SettingsRowDivider() }
+                            HStack(spacing: 8) {
+                                Text(item.resolutionText)
+                                    .font(.system(size: 12.5, weight: .medium).monospacedDigit())
+                                if item.hiDPI {
+                                    StatusChip(text: "HiDPI", tint: .purple)
+                                } else {
+                                    StatusChip(text: "LoDPI", tint: .secondary)
+                                }
+                                Text("\(item.pixelWidth) × \(item.pixelHeight) px · \(item.aspectRatio)")
+                                    .font(.system(size: 11).monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button {
+                                    resolutions.removeAll { $0.id == item.id }
+                                    persistDraft()
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove \(item.summary)")
+                            }
+                            .padding(.horizontal, SettingsStyle.rowInset)
+                            .padding(.vertical, 7)
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
+            }
+
+            if let statusMessage {
+                SettingsRowDivider()
+                HStack(spacing: 6) {
+                    Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(isError ? Color.red : Color.green)
+                    Text(statusMessage)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(isError ? Color.red : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, SettingsStyle.rowInset)
+                .padding(.vertical, 8)
+            }
+
+            SettingsRowDivider()
+
+            SettingsButtonRow {
+                Button("Add HiDPI Presets") { addPresets() }
+                    .disabled(busy)
+                if !resolutions.isEmpty {
+                    Button("Clear") {
+                        resolutions = []
+                        persistDraft()
+                    }
+                    .disabled(busy)
+                }
+                if installed {
+                    Button("Remove Override…") { removeOverride() }
+                        .disabled(busy)
+                }
+                Button(busy ? "Applying…" : "Apply Override…") { applyOverride() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(busy || resolutions.isEmpty)
+            }
+        }
+        .onAppear { load() }
+        .onChange(of: display.id) { _, _ in load() }
+    }
+
+    private var canAdd: Bool {
+        guard let w = Int(widthText), let h = Int(heightText) else { return false }
+        let factor = hiDPI ? 2 : 1
+        return w >= 320 && h >= 200 && w * factor <= 16384 && h * factor <= 16384
+    }
+
+    private func load() {
+        let manager = DisplayOverrideManager.shared
+        installed = manager.hasInstalledOverride(for: display)
+        installedResolutions = manager.readInstalledResolutions(for: display)
+        let saved = store.state.customResolutionsByDisplay[display.identity] ?? []
+        resolutions = installed ? installedResolutions : saved
+        statusMessage = nil
+        isError = false
+    }
+
+    private func persistDraft() {
+        store.state.customResolutionsByDisplay[display.identity] = resolutions.isEmpty ? nil : resolutions
+    }
+
+    private func addResolution() {
+        guard let w = Int(widthText), let h = Int(heightText), canAdd else { return }
+        let entry = CustomResolution(width: w, height: h, hiDPI: hiDPI)
+        if !resolutions.contains(where: { $0.id == entry.id }) {
+            resolutions.append(entry)
+            sortResolutions()
+            persistDraft()
+        }
+        widthText = ""
+        heightText = ""
+    }
+
+    private func addPresets() {
+        let presets = DisplayOverrideManager.suggestedHiDPIResolutions(for: display)
+        var seen = Set(resolutions.map(\.id))
+        for item in presets where seen.insert(item.id).inserted {
+            resolutions.append(item)
+        }
+        sortResolutions()
+        persistDraft()
+        statusMessage = nil
+    }
+
+    private func sortResolutions() {
+        resolutions.sort {
+            if $0.width != $1.width { return $0.width > $1.width }
+            if $0.height != $1.height { return $0.height > $1.height }
+            return $0.hiDPI && !$1.hiDPI
+        }
+    }
+
+    private func applyOverride() {
+        busy = true
+        statusMessage = nil
+        let targetResolutions = resolutions
+        Task { @MainActor in
+            let result = await DisplayOverrideManager.shared.installOverride(for: display, resolutions: targetResolutions)
+            busy = false
+            switch result {
+            case .success:
+                installed = true
+                installedResolutions = DisplayOverrideManager.shared.readInstalledResolutions(for: display)
+                resolutions = installedResolutions
+                persistDraft()
+                isError = false
+                statusMessage = "Override installed (\(installedResolutions.count) modes). Reconnect \(display.name) or restart your Mac to load the new HiDPI modes."
+            case .failure(let error):
+                isError = true
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func removeOverride() {
+        busy = true
+        statusMessage = nil
+        Task { @MainActor in
+            let result = await DisplayOverrideManager.shared.removeOverride(for: display)
+            busy = false
+            switch result {
+            case .success:
+                installed = false
+                installedResolutions = []
+                isError = false
+                statusMessage = "Override removed. Reconnect \(display.name) or restart your Mac to restore system defaults."
+            case .failure(let error):
+                isError = true
+                statusMessage = error.localizedDescription
+            }
+        }
     }
 }
 

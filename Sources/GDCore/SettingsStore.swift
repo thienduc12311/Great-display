@@ -153,6 +153,9 @@ public struct VirtualScreenConfiguration: Codable, Identifiable, Equatable {
     }
     /// Allows framebuffers up to 16K × 16K (8K × 8K HiDPI) instead of 8K.
     public var allowOver8K: Bool = false
+    /// Extra user-defined resolutions always published in this virtual screen's
+    /// mode list (in addition to the default size and the flexible ladder).
+    public var customResolutions: [CustomResolution] = []
 
     public init() {}
 
@@ -207,6 +210,7 @@ public struct VirtualScreenConfiguration: Codable, Identifiable, Equatable {
         default: break
         }
         allowOver8K = v(.allowOver8K, d.allowOver8K)
+        customResolutions = v(.customResolutions, d.customResolutions)
     }
 }
 
@@ -314,6 +318,9 @@ public struct PersistedState: Codable {
     /// Last known name of every display seen, by identity (for listing
     /// displays that are currently disconnected).
     public var knownDisplayNames: [String: String] = [:]
+    /// Custom HiDPI/LoDPI resolutions configured for physical displays, keyed
+    /// by display identity.
+    public var customResolutionsByDisplay: [String: [CustomResolution]] = [:]
 
     public init() {}
 
@@ -328,6 +335,7 @@ public struct PersistedState: Codable {
         displayPreferences = (try? c.decodeIfPresent([String: DisplayPreferences].self, forKey: .displayPreferences)) ?? [:]
         streams = (try? c.decodeIfPresent([StreamConfiguration].self, forKey: .streams)) ?? []
         knownDisplayNames = (try? c.decodeIfPresent([String: String].self, forKey: .knownDisplayNames)) ?? [:]
+        customResolutionsByDisplay = (try? c.decodeIfPresent([String: [CustomResolution]].self, forKey: .customResolutionsByDisplay)) ?? [:]
     }
 }
 

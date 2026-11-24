@@ -80,12 +80,16 @@ the slider back. Replies are checked against their checksum
 cached, so slider writes do not read first. Transactions are spaced at least
 50 ms apart. Set VCP frames use the DDC/CI checksum over `0x6E ^ 0x51 ^ payload`.
 
-Some monitors, notably the Dell U2723QE, return the DDC/CI Null Message
-(`6E 80 BE`) to every request on the video cable. That is a valid reply, not a
-missing one: the monitor is refusing DDC/CI on that connection. `reading`
-returns `.refused` for it, and the refusal is cached for 30 seconds so menu
-refreshes do not hammer the bus. The same VCP requests are then sent through
-the monitor's USB upstream connection. Two kinds of bridge are supported:
+Some monitors return the DDC/CI Null Message (`6E 80 BE`) on the video cable.
+That is a valid reply, not a missing one. The first thing to check is the
+monitor's OSD › Others › DDC/CI setting; with it switched off, the Null Message
+is expected. A Dell U2723QE has also been observed to answer one probe after
+being power-cycled with DDC/CI enabled and then return the Null Message to
+later requests, so enabling the setting is necessary but not always sufficient
+on older firmware. `reading` returns `.refused` for the Null Message, and the
+refusal is cached for 30 seconds so menu refreshes do not hammer the bus. The
+same VCP requests are then sent through the monitor's USB upstream connection.
+Two kinds of bridge are supported:
 Realtek vendor HID reports (`0BDA:1100`, usage page `0xFFDA`) through
 `DellUSBTransport`, and monitors that use Dell's control-transfer protocol
 through the monitor SDK that DDPM installs (`DellMonitorSDKBridge`, in process,
@@ -167,11 +171,12 @@ DisplayLink output):
 - DDC/CI: brightness `85/100`, contrast `75/100`, volume `6/100` and input
   source `6939` read from a Dell S2725QC. Setting brightness to `84` was
   accepted and read back as `84/100`, then restored to `85/100`.
-- A Dell U2723QE answers the video-side DDC/CI channel with the Null Message
-  (`6E 80 BE`), not a VCP reply. Its USB bridge is used instead: brightness,
-  contrast, input source and the capabilities string read successfully, and
-  brightness writes applied and read back. Input switching uses the same write
-  path; it was not exercised because it would blank the desktop.
+- A Dell U2723QE with DDC/CI enabled answered one video-side probe after a
+  power cycle, then returned the Null Message (`6E 80 BE`) to later requests.
+  Its USB bridge was used instead: brightness, contrast, input source and the
+  capabilities string read successfully, and brightness writes applied and
+  read back. Input switching uses the same write path; it was not exercised
+  because it would blank the desktop.
 - Virtual displays: a 1920 x 1080 HiDPI screen is created as a 3840 x 2160
   panel with 24 modes and a 1920 x 1080 HiDPI desktop.
 - Resolution switching on a Dell S2725QC: `2560 × 1440 HiDPI @120` →

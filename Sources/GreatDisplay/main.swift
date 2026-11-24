@@ -501,14 +501,25 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
             wait(0.3)
         }
 
+        // Display override binary encoding round-trip (pure in-memory check).
+        do {
+            let hi = CustomResolution(width: 2304, height: 1296, hiDPI: true)
+            let lo = CustomResolution(width: 2560, height: 1440, hiDPI: false)
+            let decodedHi = DisplayOverrideManager.decodeScaleResolution(DisplayOverrideManager.encodeScaleResolution(hi))
+            let decodedLo = DisplayOverrideManager.decodeScaleResolution(DisplayOverrideManager.encodeScaleResolution(lo))
+            check("display override scale-resolutions round-trip", decodedHi == hi && decodedLo == lo,
+                  "\(decodedHi?.summary ?? "nil"), \(decodedLo?.summary ?? "nil")")
+        }
+
         // Flexible virtual resolutions and a live resize (same display ID).
         if let screen = VirtualScreenManager.shared.active.first(where: { $0.displayID == id }) {
             let sizes = DisplayManager.shared.display(id: id).map { Set($0.modes.map { "\($0.width)x\($0.height)" }).count } ?? 0
-            check("flexible virtual modes", sizes >= 8, "\(sizes) sizes published")
+            check("flexible virtual modes", sizes >= 20, "\(sizes) sizes published")
             print("info virtual screen max framebuffer \(screen.maxPixels.wide) × \(screen.maxPixels.high)")
             var wider = screen.configuration
             wider.width = 2560
             wider.height = 1080
+            wider.customResolutions = [CustomResolution(width: 2134, height: 1200, hiDPI: true)]
             VirtualScreenManager.shared.update(wider)
             wait(2.0)
             // This process's CoreGraphics cache does not see the new mode table
@@ -530,8 +541,12 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
                 guard let w = $0["width"] as? Int, let h = $0["height"] as? Int, h > 0 else { return false }
                 return ModeInfo.aspectLabel(width: w, height: h) == "21:9" || abs(Double(w) / Double(h) - 2.37) < 0.03
             }
+            let hasCustom = modes.contains {
+                ($0["width"] as? Int) == 2134 && ($0["height"] as? Int) == 1200 && ($0["hiDPI"] as? Bool) == true
+            }
             check("live resize keeps the display", entry != nil, "display \(id)")
             check("live resize publishes 21:9 modes", wide, "\(modes.count) modes, current \(entry?["resolution"] as? String ?? "-")")
+            check("custom HiDPI resolution published live", hasCustom, "2134×1200 HiDPI")
         }
 
         // Associated display: a virtual screen tied to a physical display
@@ -733,6 +748,98 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
         print(ok ? "HiDPI toggled" : (DisplayManager.shared.lastError ?? "no complementary mode available"))
         return ok ? 0 : 4
 
+    case "--hidpi-override":
+        guard arguments.count >= 4, let id = UInt32(arguments[2]) else {
+            printError("usage: --hidpi-override <displayID> <list|presets|add <WxH[:lodpi]>…|remove>")
+            return 2
+        }
+        DisplayManager.shared.refresh()
+        guard let display = DisplayManager.shared.display(id: id) else {
+            printError("unknown display \(id)")
+            return 3
+        }
+        let overrides = DisplayOverrideManager.shared
+        guard overrides.canOverride(display) else {
+            printError("\(display.name) does not support display overrides (physical display with valid vendor/product ID required)")
+            return 4
+        }
+        let action = arguments[3].lowercased()
+        let url = overrides.userOverrideURL(vendorID: display.vendorID, modelID: display.modelID)
+        switch action {
+        case "list":
+            let installed = overrides.hasInstalledOverride(for: display)
+            print("display: \(display.name) (\(String(format: "%04X:%04X", display.vendorID, display.modelID)))")
+            print("override: \(installed ? url.path : "none")")
+            let items = overrides.readInstalledResolutions(for: display)
+            for item in items {
+                print("  \(item.summary)  (\(item.pixelWidth) × \(item.pixelHeight) px)")
+            }
+            if items.isEmpty {
+                print("suggested HiDPI presets: \(DisplayOverrideManager.suggestedHiDPIResolutions(for: display).count)")
+            }
+            return 0
+        case "presets", "add":
+            var list = overrides.readInstalledResolutions(for: display)
+            var seen = Set(list.map(\.id))
+            if action == "presets" {
+                for item in DisplayOverrideManager.suggestedHiDPIResolutions(for: display) where seen.insert(item.id).inserted {
+                    list.append(item)
+                }
+            } else {
+                guard arguments.count >= 5 else {
+                    printError("usage: --hidpi-override <displayID> add <WxH[:lodpi]>…")
+                    return 2
+                }
+                for spec in arguments.dropFirst(4) {
+                    let parts = spec.lowercased().split(separator: ":", maxSplits: 1)
+                    let dims = parts[0].split(separator: "x")
+                    guard dims.count == 2, let w = Int(dims[0]), let h = Int(dims[1]), w >= 320, h >= 200 else {
+                        printError("invalid resolution '\(spec)' (expected WxH or WxH:lodpi)")
+                        return 2
+                    }
+                    let hiDPI = parts.count < 2 || parts[1] != "lodpi"
+                    let item = CustomResolution(width: w, height: h, hiDPI: hiDPI)
+                    if seen.insert(item.id).inserted { list.append(item) }
+                }
+            }
+            var finished = false
+            var outcome: Result<URL, DisplayOverrideManager.OverrideError> = .failure(.cancelled)
+            Task { @MainActor in
+                outcome = await overrides.installOverride(for: display, resolutions: list)
+                finished = true
+            }
+            while !finished { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            switch outcome {
+            case .success(let path):
+                print("installed \(list.count) custom mode(s) at \(path.path)")
+                print("reconnect \(display.name) or restart macOS to load the new HiDPI modes")
+                return 0
+            case .failure(let error):
+                printError(error.localizedDescription)
+                return 4
+            }
+        case "remove":
+            var finished = false
+            var outcome: Result<Void, DisplayOverrideManager.OverrideError> = .failure(.cancelled)
+            Task { @MainActor in
+                outcome = await overrides.removeOverride(for: display)
+                finished = true
+            }
+            while !finished { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            switch outcome {
+            case .success:
+                print("removed override at \(url.path)")
+                print("reconnect \(display.name) or restart macOS to restore system defaults")
+                return 0
+            case .failure(let error):
+                printError(error.localizedDescription)
+                return 4
+            }
+        default:
+            printError("usage: --hidpi-override <displayID> <list|presets|add <WxH[:lodpi]>…|remove>")
+            return 2
+        }
+
     case "--create-virtual":
         guard arguments.count >= 4,
               let width = UInt32(arguments[2]),
@@ -767,7 +874,7 @@ func runCommandLine(_ arguments: [String]) -> Int32 {
 }
 
 let applicationArguments = CommandLine.arguments
-let commands: Set<String> = ["--probe", "--set-brightness", "--set-resolution", "--toggle-hidpi",
+let commands: Set<String> = ["--probe", "--set-brightness", "--set-resolution", "--toggle-hidpi", "--hidpi-override",
                              "--create-virtual", "--ddc-read", "--ddc-write", "--ddc-diag", "--ddc-caps", "--usb-probe", "--mirror",
                              "--rotate", "--hdr", "--disconnect", "--reconnect", "--system-colors", "--adjust", "--self-test", "--audio-output", "--ddc-burst", "--displaylink-probe",
                              "--mirror-demo", "--stream-check", "--stream-test"]

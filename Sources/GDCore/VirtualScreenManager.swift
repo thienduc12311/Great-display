@@ -83,29 +83,50 @@ public final class VirtualScreenManager: ObservableObject {
     // MARK: Modes
 
     /// Logical sizes published for a configuration: the configured size first,
-    /// then (when flexible) a ladder of common widths in the same aspect ratio,
-    /// from 640 up to 1.5 × the configured size, within the pixel ceiling.
+    /// any user-defined custom resolutions next, and then (when flexible) a
+    /// dense ladder of HiDPI/LoDPI widths in the same aspect ratio up to the
+    /// framebuffer pixel ceiling.
     public static func logicalSizes(for configuration: VirtualScreenConfiguration) -> [(width: Int, height: Int)] {
         let base = (width: max(320, configuration.width), height: max(200, configuration.height))
-        guard configuration.flexibleModes else { return [base] }
-        let ratio = Double(base.width) / Double(base.height)
         let density = configuration.hiDPI ? 2 : 1
         let ceiling = maximumPixels(for: configuration)
-        let ceilingWidth = Double(ceiling / density)
-        let ceilingHeight = Double(ceiling / density)
-        let upper = min(Double(base.width) * 1.5, ceilingWidth, ceilingHeight * ratio)
-        let ladder = [640, 720, 800, 960, 1024, 1152, 1280, 1366, 1440, 1600, 1680, 1792, 1920, 2048, 2240,
-                      2304, 2560, 2880, 3008, 3200, 3360, 3440, 3840, 4096, 5120, 6016, 6144, 7680]
+        let maxLogical = ceiling / density
+
         var sizes = [base]
-        var seen = Set([base.width])
+        var seen = Set(["\(base.width)x\(base.height)"])
+
+        for custom in configuration.customResolutions {
+            let width = min(maxLogical, max(minimumSide, (custom.width / 2) * 2))
+            let height = min(maxLogical, max(200, (custom.height / 2) * 2))
+            let key = "\(width)x\(height)"
+            if seen.insert(key).inserted {
+                sizes.append((width, height))
+            }
+        }
+
+        guard configuration.flexibleModes else { return sizes }
+
+        let ratio = Double(base.width) / Double(base.height)
+        let ceilingWidth = Double(maxLogical)
+        let ceilingHeight = Double(maxLogical)
+        let upper = min(ceilingWidth, ceilingHeight * ratio)
+        let ladder = [
+            640, 720, 800, 896, 960, 1024, 1088, 1152, 1216, 1280, 1344, 1366, 1440, 1504, 1536, 1600,
+            1680, 1728, 1792, 1856, 1920, 1984, 2048, 2112, 2176, 2240, 2304, 2368, 2400, 2496, 2560,
+            2624, 2688, 2752, 2816, 2880, 2944, 3008, 3072, 3136, 3200, 3264, 3360, 3440, 3584, 3712,
+            3840, 4096, 4352, 4608, 5120, 5632, 6016, 6144, 6720, 7680,
+        ]
         let isPortrait = ratio < 1
         for step in ladder {
             // For portrait screens the ladder describes the height.
             let width = isPortrait ? Int((Double(step) * ratio / 2).rounded()) * 2 : step
             let height = isPortrait ? step : Int((Double(step) / ratio / 2).rounded()) * 2
-            guard Double(width) <= upper, width >= 480, height >= 360, !seen.contains(width) else { continue }
-            seen.insert(width)
-            sizes.append((width, height))
+            guard Double(width) <= upper, Double(height) <= ceilingHeight,
+                  width >= 480, height >= 360 else { continue }
+            let key = "\(width)x\(height)"
+            if seen.insert(key).inserted {
+                sizes.append((width, height))
+            }
         }
         return sizes
     }
@@ -224,6 +245,7 @@ public final class VirtualScreenManager: ObservableObject {
         let geometryChanged = previous.width != configuration.width || previous.height != configuration.height
             || previous.hiDPI != configuration.hiDPI || previous.refreshRate != configuration.refreshRate
             || previous.flexibleModes != configuration.flexibleModes
+            || previous.customResolutions != configuration.customResolutions
         guard geometryChanged else { return }
 
         let modes = Self.pixelModes(for: configuration)
