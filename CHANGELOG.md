@@ -9,6 +9,32 @@ change under **Unreleased** in the same pull request.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-23
+
+Physical displays and virtual screens now support custom HiDPI resolutions beyond
+the limited set macOS exposes by default.
+
+### Added
+
+- **Custom HiDPI resolutions for physical displays.** Each physical display's
+  **Picture** tab in Settings now includes a **Custom HiDPI Resolutions** card
+  that writes macOS `scale-resolutions` display override plists to
+  `/Library/Displays/Contents/Resources/Overrides/` (preserving existing
+  override keys). Add any custom `width × height` resolution (aspect-locked or
+  free), or click **Add HiDPI Presets** to load a full aspect-matched HiDPI
+  preset pack for 16:9, 16:10, 21:9, 32:9, portrait and other panels. Reconnect
+  the display or restart macOS to load newly installed modes, and remove the
+  override anytime with one click.
+- **Custom resolutions & denser HiDPI ladder for virtual screens.** Virtual
+  screens now publish a 56-step flexible HiDPI ladder spanning the full
+  framebuffer ceiling (up to 3840 wide HiDPI, or 7680 wide with over-8K
+  enabled) instead of capping at 1.5× the default size. Each virtual screen's
+  settings page also adds a **Custom Resolutions** card to publish exact
+  logical sizes live without reconnecting.
+- **CLI support:** `--hidpi-override <displayID> <list|presets|add <WxH[:lodpi]>…|remove>`
+  inspects, installs and removes physical display HiDPI overrides from the
+  command line.
+
 ## [1.3.0] - 2026-11-21
 
 Great Display now updates itself, and monitors behind a DisplayLink dock can
@@ -233,7 +259,8 @@ First public release.
 - Universal (Apple Silicon and Intel) DMG and ZIP builds published by GitHub
   Actions.
 
-[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/thienduc12311/Great-display/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/thienduc12311/Great-display/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/thienduc12311/Great-display/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/thienduc12311/Great-display/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/thienduc12311/Great-display/compare/v1.1.0...v1.1.1
